@@ -1,0 +1,1231 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>タスク管理ボード</title>
+<link rel="manifest" href="./manifest.json">
+<meta name="theme-color" content="#3e4149">
+<meta name="apple-mobile-web-app-title" content="タスク">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+<link rel="icon" href="./icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ margin:0; height:100%; overflow:hidden; overscroll-behavior:none; }
+  body{
+    font-family:'Noto Sans JP',system-ui,-apple-system,sans-serif;
+    background:oklch(0.975 0.006 90);
+    color:oklch(0.28 0.012 260);
+    -webkit-text-size-adjust:100%;
+  }
+  #app{ position:relative; width:100%; height:100dvh; display:flex; flex-direction:column; overflow:hidden; }
+  button{ font-family:inherit; }
+  input,textarea{ font-family:inherit; }
+  @keyframes toastIn{ from{ opacity:0; transform:translate(-50%,12px);} to{ opacity:1; transform:translate(-50%,0);} }
+  @keyframes modalIn{ from{ opacity:0; transform:translateY(10px) scale(.985);} to{ opacity:1; transform:translateY(0) scale(1);} }
+  /* 縦向き・狭幅ではボタンのラベルを畳んでアイコンのみに */
+  @media (max-width:900px){ .btn-label{ display:none; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+(function(){
+"use strict";
+
+/* ============================================================
+   定数
+   ============================================================ */
+var APP_VERSION = '1.1.0';    // 更新時は sw.js の CACHE も同じ値に上げること
+var STORE_KEY = 'lrt-task-board-v1';
+var CARD_CAP  = 4;            // 各象限の既定表示件数（超過分は折りたたむ）
+var ARCHIVE_DELAY = 4200;     // 完了 → 自動アーカイブまで(ms)
+var TOAST_DELAY   = 4600;
+
+var QUAD_DEFS = [
+  { k:'q1', u:1, i:1, title:'すぐやる',       sub:'短期', hue:30  },
+  { k:'q2', u:0, i:1, title:'計画して進める', sub:'長期', hue:250 },
+  { k:'q3', u:1, i:0, title:'さばく・任せる', sub:'',     hue:196 },
+  { k:'q4', u:0, i:0, title:'後回し・見送り', sub:'',     hue:260 }
+];
+var NEW_PROJ_HUES = [20, 86, 340, 110, 270];
+
+/* ============================================================
+   日付ユーティリティ
+   ============================================================ */
+function today(){ var d = new Date(); d.setHours(0,0,0,0); return d; }
+function iso(d){
+  return d.getFullYear() + '-' +
+    String(d.getMonth()+1).padStart(2,'0') + '-' +
+    String(d.getDate()).padStart(2,'0');
+}
+function plusDays(n){ var d = today(); d.setDate(d.getDate()+n); return d; }
+function daysTo(due){ return Math.round((new Date(due+'T00:00:00') - today()) / 86400000); }
+function todayLabel(){
+  var d = today(), w = ['日','月','火','水','木','金','土'][d.getDay()];
+  return d.getFullYear() + '年 ' + (d.getMonth()+1) + '月' + d.getDate() + '日（' + w + '）';
+}
+function fmtDue(due){ var x = new Date(due+'T00:00:00'); return '〆 ' + (x.getMonth()+1) + '/' + x.getDate(); }
+
+/* 期限接近ルール: 超過 / 当日 / 3日以内 / それ以外 */
+function dstate(due){
+  var n = daysTo(due);
+  if(n < 0)  return { k:'over',  n:n };
+  if(n === 0)return { k:'today', n:n };
+  if(n <= 3) return { k:'soon',  n:n };
+  return { k:'norm', n:n };
+}
+function dueColors(k){
+  if(k === 'over') return { bg:'oklch(0.955 0.05 30)',  bd:'oklch(0.64 0.17 30)', txt:true  };
+  if(k === 'today')return { bg:'oklch(0.96 0.045 60)',  bd:'oklch(0.72 0.15 58)', txt:true  };
+  if(k === 'soon') return { bg:'oklch(0.968 0.03 80)',  bd:'oklch(0.8 0.11 78)',  txt:false };
+  return { bg:'oklch(0.995 0.003 90)', bd:'oklch(0.9 0.006 95)', txt:false };
+}
+function badgeText(ds){
+  if(ds.k === 'over')  return (-ds.n) + '日超過';
+  if(ds.k === 'today') return '本日';
+  if(ds.k === 'soon')  return 'あと' + ds.n + '日';
+  return '';
+}
+
+/* ============================================================
+   DOM ヘルパ
+   ============================================================ */
+function h(tag, props){
+  var el = document.createElement(tag), i, k, c;
+  props = props || {};
+  for(k in props){
+    if(!Object.prototype.hasOwnProperty.call(props, k)) continue;
+    var v = props[k];
+    if(v == null || v === false) continue;
+    if(k === 'style')       el.style.cssText = v;
+    else if(k === 'text')   el.textContent = v;
+    else if(k === 'html')   el.innerHTML = v;
+    else if(k === 'ref')    v(el);
+    else if(k.slice(0,2) === 'on') el.addEventListener(k.slice(2).toLowerCase(), v);
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for(i = 2; i < arguments.length; i++){
+    c = arguments[i];
+    if(c == null || c === false) continue;
+    if(Array.isArray(c)) c.forEach(function(x){ if(x != null && x !== false) el.appendChild(x); });
+    else if(typeof c === 'string') el.appendChild(document.createTextNode(c));
+    else el.appendChild(c);
+  }
+  return el;
+}
+function spacer(){ return h('span', { style:'flex:1;' }); }
+
+/* ============================================================
+   永続化
+   ============================================================ */
+function seed(){
+  var P = [
+    { id:'p1', name:'大手町オフィス改修', hue:250 },
+    { id:'p2', name:'世田谷 K邸 新築',    hue:150 },
+    { id:'p3', name:'中央区 集合住宅',    hue:308 },
+    { id:'p4', name:'市民美術館 コンペ',  hue:196 }
+  ];
+  var T = [
+    ['t1', 'p1','実施図面 一式チェック',   1,1,  0],
+    ['t2', 'p4','コンペ提案書 レイアウト', 1,1,  2],
+    ['t3', 'p2','構造事務所と打合せ調整',  1,1, -1],
+    ['t4', 'p1','断面詳細図の修正',        1,1,  4],
+    ['t5', 'p2','設備プロット確認',        1,1,  3],
+    ['t6', 'p4','コンペ参加登録',          1,1,  5],
+    ['t7', 'p3','外装仕上げの検討',        0,1, 19],
+    ['t8', 'p2','プレゼン用CGの発注',      0,1, 12],
+    ['t9', 'p1','省エネ計算の更新',        0,1,  8],
+    ['t10','p3','確認申請 書類の収集',     1,0,  1],
+    ['t11','p4','模型材料の発注',          1,0,  0],
+    ['t12','p3','近隣説明 資料の印刷',     1,0,  3],
+    ['t13','p1','議事録の送付',            0,0,  6],
+    ['t14','p2','家具カタログの取り寄せ',  0,0, 24]
+  ].map(function(r){
+    return { id:r[0], pj:r[1], t:r[2], u:r[3], i:r[4], due:iso(plusDays(r[5])), done:false, arch:false };
+  });
+  return { projects:P, tasks:T };
+}
+function load(){
+  try{
+    var raw = localStorage.getItem(STORE_KEY);
+    if(!raw) return seed();
+    var d = JSON.parse(raw);
+    if(!d || !Array.isArray(d.projects) || !Array.isArray(d.tasks)) return seed();
+    return {
+      projects:d.projects, tasks:d.tasks, ink:d.ink || null,
+      owner:d.owner || '', backedUpAt:d.backedUpAt || null
+    };
+  }catch(e){ return seed(); }
+}
+function snapshot(){
+  return {
+    app:'lrt-task-board', version:APP_VERSION, savedAt:new Date().toISOString(),
+    owner:S.owner, projects:S.projects, tasks:S.tasks, ink:S.ink || null,
+    backedUpAt:S.backedUpAt || null
+  };
+}
+function save(){
+  try{
+    localStorage.setItem(STORE_KEY, JSON.stringify(snapshot()));
+  }catch(e){ /* 容量超過等は無視（表示は継続する） */ }
+}
+
+/* ============================================================
+   状態
+   ============================================================ */
+var boot = load();
+var S = {
+  view:'matrix',
+  projects:boot.projects,
+  tasks:boot.tasks,
+  ink:boot.ink || null,
+  owner:boot.owner || '',
+  backedUpAt:boot.backedUpAt || null,
+  filter:[], sort:'due', expanded:{},
+  penOn:false, pen:{ tool:'pen', color:'#33373f' },
+  filterOpen:false, archiveOpen:false, settingsOpen:false,
+  add:null, edit:null, newProjName:'',
+  updateReady:false,
+  toast:null
+};
+var timers = {};      // 完了 → アーカイブ の予約
+var toastTimer = null;
+var swipe = null;     // スワイプ中の一時状態
+var justSwiped = false;
+var canvasEl = null;  // 手書きレイヤー（再描画をまたいで使い回す）
+
+function setState(patch, opts){
+  Object.assign(S, patch);
+  if(!opts || opts.persist !== false) save();
+  if(!opts || opts.render !== false) render();
+}
+
+/* ============================================================
+   参照系
+   ============================================================ */
+function proj(id){
+  for(var i=0;i<S.projects.length;i++) if(S.projects[i].id === id) return S.projects[i];
+  return { name:'—', hue:260 };
+}
+function projColor(hue){ return 'oklch(0.56 0.11 ' + hue + ')'; }
+function task(id){
+  for(var i=0;i<S.tasks.length;i++) if(S.tasks[i].id === id) return S.tasks[i];
+  return null;
+}
+function activeTasks(){
+  return S.tasks.filter(function(t){
+    return !t.arch && (S.filter.length === 0 || S.filter.indexOf(t.pj) >= 0);
+  });
+}
+function priRank(t){ return (t.u && t.i) ? 0 : t.i ? 1 : t.u ? 2 : 3; }
+function priTag(t){ if(t.u && t.i) return '重要・緊急'; if(t.i) return '重要'; if(t.u) return '緊急'; return '—'; }
+
+/* ============================================================
+   操作
+   ============================================================ */
+function completeTask(id){
+  var t = task(id); if(!t) return;
+  if(t.done){                                   // 完了の取り消し
+    clearArchiveTimer(id);
+    t.done = false;
+    setState({ toast:null });
+    return;
+  }
+  t.done = true;
+  setState({});
+  timers[id] = setTimeout(function(){
+    var x = task(id);
+    if(x){ x.arch = true; }
+    delete timers[id];
+    setState({ toast:null });
+  }, ARCHIVE_DELAY);
+  showToast('タスクを完了しました', function(){
+    clearArchiveTimer(id);
+    var x = task(id); if(x) x.done = false;
+    setState({});
+  });
+}
+function clearArchiveTimer(id){
+  if(timers[id]){ clearTimeout(timers[id]); delete timers[id]; }
+}
+function deleteTask(id){
+  var t = task(id); if(!t) return;
+  clearArchiveTimer(id);
+  setState({ tasks:S.tasks.filter(function(x){ return x.id !== id; }) });
+  showToast('タスクを削除しました', function(){
+    setState({ tasks:[t].concat(S.tasks) });
+  });
+}
+function restoreTask(id){
+  clearArchiveTimer(id);
+  var t = task(id); if(!t) return;
+  t.arch = false; t.done = false;
+  setState({});
+}
+function showToast(text, undo){
+  if(toastTimer) clearTimeout(toastTimer);
+  setState({ toast:{ text:text, undo:undo } }, { persist:false });
+  toastTimer = setTimeout(function(){ setState({ toast:null }, { persist:false }); }, TOAST_DELAY);
+}
+
+/* ---- スワイプ削除 ---- */
+function swDown(e, id){
+  swipe = { id:id, x:e.clientX, el:e.currentTarget, dx:0 };
+  justSwiped = false;
+  try{ e.currentTarget.setPointerCapture(e.pointerId); }catch(_){}
+}
+function swMove(e){
+  if(!swipe) return;
+  var dx = e.clientX - swipe.x;
+  if(dx > 0) dx = 0;
+  if(dx < -150) dx = -150;
+  swipe.dx = dx;
+  if(dx < -6) justSwiped = true;
+  swipe.el.style.transition = 'none';
+  swipe.el.style.transform = 'translateX(' + dx + 'px)';
+  var bg = swipe.el.parentNode.querySelector('[data-del]');
+  if(bg) bg.style.opacity = Math.min(1, -dx / 90);
+}
+function swUp(){
+  if(!swipe) return;
+  var s = swipe; swipe = null;
+  var bg = s.el.parentNode.querySelector('[data-del]');
+  if(s.dx < -90){
+    s.el.style.transition = 'transform .16s';
+    s.el.style.transform = 'translateX(-110%)';
+    setTimeout(function(){ deleteTask(s.id); }, 150);
+  }else{
+    s.el.style.transition = 'transform .16s';
+    s.el.style.transform = 'translateX(0)';
+    if(bg) bg.style.opacity = 0;
+  }
+}
+
+/* ---- 追加フロー ---- */
+function openAdd(){
+  setState({ add:{ step:1, pj:null, title:'', u:null, i:null, due:iso(today()) }, newProjName:'' }, { persist:false });
+}
+function closeAdd(){ setState({ add:null }, { persist:false }); }
+function addBack(){
+  var a = S.add; if(!a) return;
+  if(a.step === 1){ closeAdd(); return; }
+  a.step -= 1; setState({}, { persist:false });
+}
+function addNext(){
+  var a = S.add; if(!a) return;
+  if(a.step < 3){
+    if(a.step === 1 && !a.pj) return;
+    if(a.step === 2 && !a.title.trim()) return;
+    a.step += 1; setState({}, { persist:false });
+    return;
+  }
+  if(a.u === null) return;
+  var id = 'n' + Date.now();
+  var t = { id:id, pj:a.pj, t:a.title.trim(), u:a.u, i:a.i, due:a.due, done:false, arch:false };
+  setState({ tasks:[t].concat(S.tasks), add:null, view:'matrix' });
+  showToast('タスクを追加しました', function(){
+    setState({ tasks:S.tasks.filter(function(x){ return x.id !== id; }) });
+  });
+}
+function addNewProj(){
+  var n = S.newProjName.trim(); if(!n) return;
+  var id = 'p' + Date.now();
+  var hue = NEW_PROJ_HUES[S.projects.length % NEW_PROJ_HUES.length];
+  S.projects = S.projects.concat([{ id:id, name:n, hue:hue }]);
+  if(S.add) S.add.pj = id;
+  setState({ newProjName:'' });
+}
+
+/* ---- 編集フロー ---- */
+function openEdit(id){
+  if(justSwiped){ justSwiped = false; return; }
+  var t = task(id); if(!t) return;
+  setState({ edit:{ id:id, pj:t.pj, title:t.t, u:t.u, i:t.i, due:t.due } }, { persist:false });
+}
+function closeEdit(){ setState({ edit:null }, { persist:false }); }
+function saveEdit(){
+  var e = S.edit; if(!e) return;
+  var t = task(e.id);
+  if(t){ t.pj = e.pj; t.t = e.title.trim() || t.t; t.u = e.u; t.i = e.i; t.due = e.due; }
+  setState({ edit:null });
+}
+function deleteFromEdit(){
+  var e = S.edit; if(!e) return;
+  setState({ edit:null }, { persist:false });
+  deleteTask(e.id);
+}
+
+/* ---- 表示切替 ---- */
+function setView(v){ setState({ view:v, archiveOpen:false }, { persist:false }); }
+function togglePen(){ setState({ penOn:!S.penOn }, { persist:false }); }
+function toggleFilter(){ setState({ filterOpen:!S.filterOpen }, { persist:false }); }
+function toggleFilterProj(id){
+  setState({
+    filter: S.filter.indexOf(id) >= 0
+      ? S.filter.filter(function(x){ return x !== id; })
+      : S.filter.concat([id])
+  }, { persist:false });
+}
+function toggleExpand(k){
+  S.expanded[k] = !S.expanded[k];
+  setState({}, { persist:false });
+}
+
+/* ============================================================
+   手書きレイヤー（ボード全体に重なる独立キャンバス）
+   ============================================================ */
+function ensureCanvas(){
+  if(canvasEl) return canvasEl;
+  var node = document.createElement('canvas');
+  canvasEl = node;
+  var ctx = node.getContext('2d');
+  var drawing = false, last = null;
+
+  function sizeToBox(){
+    var r = node.getBoundingClientRect();
+    if(!r.width || !r.height) return;
+    var w = Math.round(r.width), hh = Math.round(r.height);
+    if(node.width === w && node.height === hh) return;
+    var prev = node.width ? node.toDataURL() : null;
+    node.width = w; node.height = hh;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    if(prev) restore(prev);
+  }
+  function restore(dataUrl){
+    var img = new Image();
+    img.onload = function(){ ctx.drawImage(img, 0, 0, node.width, node.height); };
+    img.src = dataUrl;
+  }
+  function pt(e){
+    var r = node.getBoundingClientRect();
+    return {
+      x:(e.clientX - r.left) * (node.width / r.width),
+      y:(e.clientY - r.top)  * (node.height / r.height)
+    };
+  }
+  node.addEventListener('pointerdown', function(e){
+    if(!S.penOn) return;
+    drawing = true; last = pt(e);
+    try{ node.setPointerCapture(e.pointerId); }catch(_){}
+  });
+  node.addEventListener('pointermove', function(e){
+    if(!drawing) return;
+    var p = pt(e);
+    ctx.globalCompositeOperation = S.pen.tool === 'erase' ? 'destination-out' : 'source-over';
+    ctx.strokeStyle = S.pen.color;
+    ctx.lineWidth = S.pen.tool === 'erase' ? 26 : 3;
+    ctx.beginPath(); ctx.moveTo(last.x, last.y); ctx.lineTo(p.x, p.y); ctx.stroke();
+    last = p;
+  });
+  function end(){
+    if(!drawing) return;
+    drawing = false;
+    S.ink = node.toDataURL();
+    save();
+  }
+  node.addEventListener('pointerup', end);
+  node.addEventListener('pointercancel', end);
+
+  node._sizeToBox = sizeToBox;
+  node._restore = restore;
+  node._ctx = ctx;
+  return node;
+}
+function penClear(){
+  if(!canvasEl) return;
+  canvasEl._ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+  setState({ ink:null });
+}
+function setTool(tool){ S.pen.tool = tool; setState({}, { persist:false }); }
+function setColor(color){ S.pen = { tool:'pen', color:color }; setState({}, { persist:false }); }
+
+/* ============================================================
+   バックアップ（書き出し / 読み込み）
+   localStorage は端末・ブラウザごとに独立し、Safari が消すこともある。
+   機種変更やデータ消失に備える唯一の手段なので、明示的に持たせている。
+   ============================================================ */
+function exportData(){
+  S.backedUpAt = new Date().toISOString();
+  var blob = new Blob([JSON.stringify(snapshot(), null, 2)], { type:'application/json' });
+  var url = URL.createObjectURL(blob);
+  var d = today();
+  var who = (S.owner || 'board').replace(/[\\\/:*?"<>|\s]+/g, '_').replace(/^_|_$/g, '');
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'taskboard_' + who + '_' + iso(d).replace(/-/g,'') + '.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+  save();
+  showToast('バックアップを書き出しました', null);
+}
+function importData(file){
+  var reader = new FileReader();
+  reader.onload = function(){
+    var d;
+    try{ d = JSON.parse(reader.result); }
+    catch(e){ alert('読み込めませんでした。書き出したJSONファイルを選んでください。'); return; }
+    if(!d || !Array.isArray(d.projects) || !Array.isArray(d.tasks)){
+      alert('このファイルはタスクボードのバックアップではないようです。');
+      return;
+    }
+    var n = d.tasks.filter(function(t){ return !t.arch; }).length;
+    if(!confirm('いまのボードを、このバックアップで置き換えます。\n\n' +
+                '書き出し日時: ' + (d.savedAt ? new Date(d.savedAt).toLocaleString('ja-JP') : '不明') + '\n' +
+                '案件 ' + d.projects.length + '件 / 未完了タスク ' + n + '件\n\n' +
+                '※ いまボードにあるタスクは戻せません。')) return;
+    Object.keys(timers).forEach(clearArchiveTimer);
+    inkRestored = false;
+    setState({
+      projects:d.projects, tasks:d.tasks, ink:d.ink || null,
+      owner:d.owner || S.owner, backedUpAt:d.backedUpAt || null,
+      filter:[], expanded:{}, settingsOpen:false, toast:null
+    });
+    if(canvasEl){ canvasEl._ctx.clearRect(0,0,canvasEl.width,canvasEl.height); }
+    showToast('バックアップを読み込みました', null);
+  };
+  reader.readAsText(file);
+}
+
+/* ============================================================
+   共通スタイル片
+   ============================================================ */
+var tabOn  = 'height:38px; padding:0 18px; border:none; border-radius:9px; font-size:14px; font-weight:700; cursor:pointer; white-space:nowrap; background:oklch(0.99 0.004 90); color:oklch(0.3 0.012 260); box-shadow:0 1px 3px oklch(0.2 0.02 260 / 0.12);';
+var tabOff = 'height:38px; padding:0 18px; border:none; border-radius:9px; font-size:14px; font-weight:500; cursor:pointer; white-space:nowrap; background:transparent; color:oklch(0.55 0.01 260);';
+var iconBtn = 'width:44px; height:44px; border:1px solid oklch(0.88 0.005 95); background:oklch(0.99 0.003 90); border-radius:12px; color:oklch(0.5 0.01 260); font-size:17px; cursor:pointer;';
+var ghostBtn = 'height:44px; padding:0 20px; border:1px solid oklch(0.88 0.005 95); background:transparent; border-radius:12px; font-size:14px; color:oklch(0.45 0.01 260); cursor:pointer;';
+
+function quadBtnStyle(on){
+  return 'display:flex; flex-direction:column; align-items:flex-start; gap:3px; padding:14px; border:1.5px solid ' +
+    (on ? 'oklch(0.5 0.05 250)' : 'oklch(0.9 0.005 95)') + '; background:' +
+    (on ? 'oklch(0.97 0.02 250)' : 'oklch(0.99 0.003 90)') +
+    '; border-radius:12px; cursor:pointer; color:oklch(0.32 0.012 260); text-align:left;';
+}
+function dueChip(due){
+  if(!due) return { text:'', style:'display:none;' };
+  var ds = dstate(due), dc = dueColors(ds.k), text;
+  if(ds.k === 'over') text = (-ds.n) + '日超過';
+  else if(ds.k === 'today') text = '本日';
+  else if(ds.k === 'soon')  text = 'あと' + ds.n + '日';
+  else text = ds.n + '日後';
+  var nu = ds.k === 'norm';
+  return { text:text, style:'font-size:11px; font-weight:700; padding:4px 10px; border-radius:8px; white-space:nowrap; background:' +
+    (nu ? 'oklch(0.93 0.005 95)' : dc.bd) + '; color:' +
+    (nu ? 'oklch(0.45 0.01 260)' : (dc.txt ? 'oklch(0.99 0.01 60)' : 'oklch(0.35 0.05 78)')) + ';' };
+}
+
+/* ============================================================
+   カード / 行
+   ============================================================ */
+function cardVisuals(t){
+  var p = proj(t.pj), ds = dstate(t.due), dc = dueColors(ds.k), pc = projColor(p.hue);
+  var done = !!t.done;
+  return {
+    p:p, ds:ds, dc:dc, pc:pc, done:done,
+    badgeShow: !done && ds.k !== 'norm',
+    badge: badgeText(ds),
+    badgeStyle:'font-size:10px; font-weight:700; padding:2px 7px; border-radius:6px; background:' + dc.bd +
+      '; color:' + (dc.txt ? 'oklch(0.99 0.01 60)' : 'oklch(0.35 0.05 78)') + ';',
+    bar:'flex:0 0 5px; align-self:stretch; background:' + pc + '; border-radius:5px 0 0 5px;',
+    projDot:'width:8px; height:8px; border-radius:2px; background:' + pc + '; flex:0 0 auto;',
+    projText:'font-size:11px; font-weight:700; color:' + pc + '; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;',
+    title:'font-size:14px; line-height:1.35; color:oklch(0.28 0.012 260);' +
+      (done ? ' text-decoration:line-through; color:oklch(0.6 0.008 260);' : ''),
+    due:'font-size:11px; color:oklch(0.55 0.01 260); font-variant-numeric:tabular-nums;' +
+      (done ? ' text-decoration:line-through;' : ''),
+    check:'flex:0 0 auto; width:24px; height:24px; border-radius:50%; cursor:pointer; font-size:13px; display:flex; align-items:center; justify-content:center; ' +
+      (done ? 'border:none; background:' + pc + '; color:#fff;'
+            : 'border:1.5px solid oklch(0.78 0.01 260); background:transparent; color:transparent;'),
+    boxBg: done ? 'oklch(0.965 0.004 90)' : dc.bg,
+    boxBd: done ? 'oklch(0.91 0.005 95)' : dc.bd
+  };
+}
+function checkButton(t, v){
+  return h('button', {
+    style:v.check,
+    onpointerdown:function(e){ e.stopPropagation(); },
+    onclick:function(e){ e.stopPropagation(); completeTask(t.id); }
+  }, v.done ? '✓' : '');
+}
+function swipeWrap(t, inner){
+  return h('div', { style:'position:relative; border-radius:11px; overflow:hidden; flex:0 0 auto;' },
+    h('div', { 'data-del':true, style:'position:absolute; inset:0; background:oklch(0.6 0.17 28); display:flex; align-items:center; justify-content:flex-end; padding-right:18px; color:oklch(0.99 0.01 30); font-size:13px; font-weight:700; opacity:0;' }, '削除'),
+    inner
+  );
+}
+
+/* マトリクス用カード */
+function taskCard(t){
+  var v = cardVisuals(t);
+  var card = h('div', {
+    style:'position:relative; display:flex; align-items:stretch; background:' + v.boxBg +
+      '; border:1px solid ' + v.boxBd + '; border-radius:11px; overflow:hidden; touch-action:pan-y; cursor:pointer;' +
+      (v.done ? ' opacity:.7;' : ''),
+    onpointerdown:function(e){ swDown(e, t.id); },
+    onpointermove:swMove,
+    onpointerup:swUp,
+    onclick:function(){ openEdit(t.id); }
+  },
+    h('div', { style:v.bar }),
+    h('div', { style:'flex:1; min-width:0; padding:9px 11px 9px 12px; display:flex; flex-direction:column; gap:5px;' },
+      h('div', { style:'display:flex; align-items:center; gap:6px;' },
+        h('span', { style:v.projDot }),
+        h('span', { style:v.projText, text:v.p.name })
+      ),
+      h('span', { style:v.title, text:t.t }),
+      h('div', { style:'display:flex; align-items:center; gap:8px; margin-top:1px;' },
+        h('span', { style:v.due, text:fmtDue(t.due) }),
+        v.badgeShow ? h('span', { style:v.badgeStyle, text:v.badge }) : null,
+        spacer(),
+        checkButton(t, v)
+      )
+    )
+  );
+  return swipeWrap(t, card);
+}
+
+/* リスト用の行 */
+function taskRow(t){
+  var v = cardVisuals(t);
+  var on = (t.u || t.i) && !v.done;
+  var row = h('div', {
+    style:'position:relative; display:flex; align-items:center; height:56px; background:' + v.boxBg +
+      '; border:1px solid ' + v.boxBd + '; border-radius:11px; overflow:hidden; touch-action:pan-y; cursor:pointer;' +
+      (v.done ? ' opacity:.7;' : ''),
+    onpointerdown:function(e){ swDown(e, t.id); },
+    onpointermove:swMove,
+    onpointerup:swUp,
+    onclick:function(){ openEdit(t.id); }
+  },
+    h('div', { style:v.bar }),
+    h('div', { style:'width:150px; flex:0 0 150px; display:flex; align-items:center; gap:7px; padding-left:14px;' },
+      h('span', { style:v.projDot }),
+      h('span', { style:v.projText, text:v.p.name })
+    ),
+    h('span', { style:v.title + ' overflow:hidden; text-overflow:ellipsis; white-space:nowrap;', text:t.t }),
+    spacer(),
+    h('div', { style:'display:flex; align-items:center; gap:6px; width:120px; justify-content:flex-end;' },
+      h('span', {
+        style:'font-size:11px; font-weight:700; padding:3px 9px; border-radius:7px; white-space:nowrap; background:' +
+          (on ? 'oklch(0.94 0.008 260)' : 'transparent') + '; color:oklch(0.5 0.01 260);',
+        text:priTag(t)
+      })
+    ),
+    h('div', { style:'width:130px; flex:0 0 130px; display:flex; align-items:center; justify-content:flex-end; gap:8px; padding-right:14px;' },
+      h('span', { style:v.due, text:fmtDue(t.due) }),
+      v.badgeShow ? h('span', { style:v.badgeStyle, text:v.badge }) : null
+    ),
+    checkButton(t, v)
+  );
+  return swipeWrap(t, row);
+}
+
+/* ============================================================
+   画面パーツ
+   ============================================================ */
+function topBar(){
+  return h('div', { style:'height:66px; flex:0 0 66px; display:flex; align-items:center; gap:12px; padding:0 16px; border-bottom:1px solid oklch(0.9 0.005 95); background:oklch(0.985 0.005 90); z-index:20;' },
+    h('div', { style:'display:flex; flex-direction:column; line-height:1.15; flex:0 0 auto;' },
+      h('span', { style:'font-size:17px; font-weight:700; color:oklch(0.32 0.012 260); letter-spacing:.02em; white-space:nowrap;', text:S.owner || 'タスクボード' }),
+      h('span', { style:'font-size:12px; color:oklch(0.6 0.01 260); white-space:nowrap;', text:todayLabel() })
+    ),
+    h('div', { style:'margin-left:8px; display:flex; padding:3px; gap:2px; background:oklch(0.93 0.005 95); border-radius:11px;' },
+      h('button', { style:S.view === 'matrix' ? tabOn : tabOff, onclick:function(){ setView('matrix'); } }, 'マトリクス'),
+      h('button', { style:S.view === 'list'   ? tabOn : tabOff, onclick:function(){ setView('list'); } }, 'リスト')
+    ),
+    spacer(),
+    filterButton(),
+    penButton(),
+    h('button', { style:iconBtn, title:'アーカイブ', onclick:function(){ setState({ archiveOpen:true }, { persist:false }); } }, '🗄'),
+    h('button', { style:iconBtn, title:'設定・バックアップ', onclick:function(){ setState({ settingsOpen:true }, { persist:false }); } }, '⚙'),
+    h('button', {
+      style:'height:44px; padding:0 20px 0 16px; display:flex; align-items:center; gap:6px; border:none; background:oklch(0.34 0.012 260); color:oklch(0.98 0.004 90); border-radius:12px; font-size:15px; font-weight:700; cursor:pointer;',
+      onclick:openAdd
+    }, h('span', { style:'font-size:20px; font-weight:400; margin-top:-2px;' }, '＋'), 'タスク')
+  );
+}
+function filterButton(){
+  var on = S.filter.length > 0;
+  return h('button', {
+    style:'height:44px; padding:0 14px; display:flex; align-items:center; gap:5px; border:1px solid ' +
+      (on ? 'oklch(0.6 0.09 250)' : 'oklch(0.88 0.005 95)') + '; background:' +
+      (on ? 'oklch(0.97 0.02 250)' : 'oklch(0.99 0.003 90)') +
+      '; border-radius:12px; font-size:14px; color:oklch(0.4 0.01 260); cursor:pointer;',
+    onclick:toggleFilter
+  },
+    h('span', { style:'font-size:14px;' }, '▽'),
+    h('span', { 'class':'btn-label' }, '絞り込み'),
+    on ? h('span', { style:'margin-left:2px; min-width:18px; height:18px; padding:0 5px; display:inline-flex; align-items:center; justify-content:center; background:oklch(0.55 0.11 250); color:#fff; border-radius:9px; font-size:11px; font-weight:700;', text:String(S.filter.length) }) : null
+  );
+}
+function penButton(){
+  return h('button', {
+    style:'height:44px; padding:0 16px; display:flex; align-items:center; gap:6px; border:1px solid ' +
+      (S.penOn ? 'oklch(0.55 0.11 250)' : 'oklch(0.88 0.005 95)') + '; background:' +
+      (S.penOn ? 'oklch(0.55 0.11 250)' : 'oklch(0.99 0.003 90)') + '; color:' +
+      (S.penOn ? '#fff' : 'oklch(0.4 0.01 260)') + '; border-radius:12px; font-size:14px; font-weight:' +
+      (S.penOn ? '700' : '500') + '; cursor:pointer;',
+    onclick:togglePen
+  }, '✎', h('span', { 'class':'btn-label' }, '手書き'));
+}
+
+function matrixView(){
+  var active = activeTasks();
+  var quads = QUAD_DEFS.map(function(d){
+    var list = active.filter(function(t){ return t.u === d.u && t.i === d.i; })
+                     .sort(function(a,b){ return daysTo(a.due) - daysTo(b.due); });
+    var exp = !!S.expanded[d.k];
+    var vis = exp ? list : list.slice(0, CARD_CAP);
+    var hidden = list.length - vis.length;
+    var accent = 'oklch(0.56 0.09 ' + d.hue + ')';
+    return h('div', { style:'display:flex; flex-direction:column; min-height:0; background:oklch(0.99 0.003 90); border:1px solid oklch(0.91 0.005 95); border-top:3px solid ' + accent + '; border-radius:13px; overflow:hidden;' },
+      h('div', { style:'display:flex; align-items:baseline; gap:8px; padding:12px 14px 8px; flex:0 0 auto;' },
+        h('span', { style:'width:9px; height:9px; border-radius:3px; background:' + accent + '; flex:0 0 auto;' }),
+        h('span', { style:'font-size:14px; font-weight:700; color:oklch(0.34 0.012 260);', text:d.title }),
+        d.sub ? h('span', { style:'font-size:11px; color:oklch(0.62 0.01 260);', text:d.sub }) : null,
+        spacer(),
+        h('span', { style:'font-size:12px; color:oklch(0.6 0.01 260); font-variant-numeric:tabular-nums;', text:list.length + '件' })
+      ),
+      h('div', { style:'flex:1; min-height:0; overflow-y:auto; padding:0 12px 12px; display:flex; flex-direction:column; gap:8px;' },
+        vis.map(taskCard),
+        (hidden > 0 || exp) ? h('button', {
+          style:'align-self:flex-start; margin-top:2px; padding:6px 12px; border:1px dashed oklch(0.8 0.01 260); background:transparent; border-radius:9px; font-size:12px; color:oklch(0.5 0.01 260); cursor:pointer;',
+          onclick:function(){ toggleExpand(d.k); }
+        }, exp ? '折りたたむ' : ('＋' + hidden + '件を表示')) : null,
+        list.length === 0 ? h('span', { style:'font-size:12px; color:oklch(0.72 0.008 260); padding:6px 2px;' }, 'タスクなし') : null
+      )
+    );
+  });
+
+  return h('div', { style:'height:100%; display:grid; grid-template-columns:30px 1fr; grid-template-rows:26px 1fr; padding:16px 18px 18px; gap:6px;' },
+    h('div', {}),
+    h('div', { style:'display:grid; grid-template-columns:1fr 1fr; gap:14px; align-items:center;' },
+      h('div', { style:'text-align:center; font-size:12px; font-weight:700; letter-spacing:.14em; color:oklch(0.58 0.02 30);' }, '緊急'),
+      h('div', { style:'text-align:center; font-size:12px; font-weight:700; letter-spacing:.14em; color:oklch(0.62 0.01 260);' }, '緊急でない')
+    ),
+    h('div', { style:'display:grid; grid-template-rows:1fr 1fr; gap:14px;' },
+      h('div', { style:'display:flex; align-items:center; justify-content:center;' },
+        h('span', { style:'writing-mode:vertical-rl; font-size:12px; font-weight:700; letter-spacing:.14em; color:oklch(0.5 0.012 260);' }, '重要')),
+      h('div', { style:'display:flex; align-items:center; justify-content:center;' },
+        h('span', { style:'writing-mode:vertical-rl; font-size:12px; font-weight:700; letter-spacing:.14em; color:oklch(0.65 0.01 260);' }, '重要でない'))
+    ),
+    h('div', { style:'display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:14px; min-height:0;' }, quads)
+  );
+}
+
+function listView(){
+  var rows = activeTasks().slice();
+  if(S.sort === 'due')       rows.sort(function(a,b){ return daysTo(a.due) - daysTo(b.due); });
+  else if(S.sort === 'proj') rows.sort(function(a,b){ return a.pj.localeCompare(b.pj) || daysTo(a.due) - daysTo(b.due); });
+  else                       rows.sort(function(a,b){ return priRank(a) - priRank(b) || daysTo(a.due) - daysTo(b.due); });
+
+  function sortBtn(key, label){
+    return h('button', {
+      style:S.sort === key ? tabOn : tabOff,
+      onclick:function(){ setState({ sort:key }, { persist:false }); }
+    }, label);
+  }
+  return h('div', { style:'height:100%; display:flex; flex-direction:column; padding:16px 22px 18px;' },
+    h('div', { style:'display:flex; align-items:center; gap:10px; padding-bottom:12px;' },
+      h('span', { style:'font-size:12px; color:oklch(0.58 0.01 260);' }, '並び替え'),
+      h('div', { style:'display:flex; padding:3px; gap:2px; background:oklch(0.93 0.005 95); border-radius:10px;' },
+        sortBtn('due','期限日'), sortBtn('proj','案件'), sortBtn('pri','緊急・重要')),
+      spacer(),
+      h('span', { style:'font-size:12px; color:oklch(0.6 0.01 260); font-variant-numeric:tabular-nums;', text:rows.length + '件' })
+    ),
+    h('div', { style:'flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:8px;' },
+      rows.map(taskRow),
+      rows.length === 0 ? h('span', { style:'font-size:13px; color:oklch(0.72 0.008 260); padding:8px 2px;' }, 'タスクなし') : null
+    )
+  );
+}
+
+function penToolbar(){
+  function toolBtn(icon, tool){
+    var on = S.pen.tool === tool;
+    return h('button', {
+      style:'width:38px; height:38px; border:none; border-radius:10px; font-size:16px; cursor:pointer; background:' +
+        (on ? 'oklch(0.55 0.11 250)' : 'oklch(0.36 0.008 260)') + '; color:oklch(0.95 0.006 260);',
+      onclick:function(){ setTool(tool); }
+    }, icon);
+  }
+  function swatch(hex){
+    var on = S.pen.tool === 'pen' && S.pen.color === hex;
+    return h('button', {
+      style:'width:30px; height:30px; border-radius:50%; cursor:pointer; background:' + hex + '; border:2.5px solid ' +
+        (on ? 'oklch(0.95 0.006 260)' : 'transparent') + '; box-shadow:' + (on ? '0 0 0 1.5px ' + hex : 'none') + ';',
+      onclick:function(){ setColor(hex); }
+    });
+  }
+  var div = h('div', { style:'width:1px; height:24px; background:oklch(0.42 0.008 260); margin:0 4px;' });
+  return h('div', { style:'position:absolute; bottom:20px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:6px; padding:8px; background:oklch(0.28 0.006 260); border-radius:16px; box-shadow:0 14px 34px -12px oklch(0.2 0.02 260 / 0.6); z-index:40;' },
+    toolBtn('✎','pen'), toolBtn('⌫','erase'),
+    div,
+    swatch('#33373f'), swatch('#c2472f'), swatch('#2f5bb0'),
+    h('div', { style:'width:1px; height:24px; background:oklch(0.42 0.008 260); margin:0 4px;' }),
+    h('button', { style:'height:38px; padding:0 14px; border:none; background:transparent; color:oklch(0.85 0.006 260); font-size:13px; cursor:pointer;', onclick:penClear }, '全消去')
+  );
+}
+
+function filterDrawer(){
+  return [
+    h('div', { style:'position:absolute; inset:0; background:oklch(0.2 0.01 260 / 0.28); z-index:50;', onclick:toggleFilter }),
+    h('div', { style:'position:absolute; top:0; right:0; bottom:0; width:340px; max-width:86%; background:oklch(0.985 0.005 90); z-index:51; box-shadow:-20px 0 50px -24px oklch(0.2 0.02 260 / 0.5); display:flex; flex-direction:column; padding:22px;' },
+      h('div', { style:'display:flex; align-items:center;' },
+        h('span', { style:'font-size:16px; font-weight:700; color:oklch(0.32 0.012 260);' }, '案件で絞り込み'),
+        spacer(),
+        h('button', { style:'border:none; background:transparent; font-size:20px; color:oklch(0.55 0.01 260); cursor:pointer;', onclick:toggleFilter }, '✕')
+      ),
+      h('span', { style:'font-size:12px; color:oklch(0.6 0.01 260); margin:6px 0 16px;' }, '複数選択できます。未選択の場合は全案件を表示。'),
+      h('div', { style:'flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:8px;' },
+        S.projects.map(function(p){
+          var on = S.filter.indexOf(p.id) >= 0, pc = projColor(p.hue);
+          return h('button', {
+            style:'display:flex; align-items:center; gap:12px; padding:12px 14px; border:1px solid ' +
+              (on ? pc : 'oklch(0.9 0.005 95)') + '; background:' + (on ? 'oklch(0.98 0.01 260)' : 'transparent') +
+              '; border-radius:11px; cursor:pointer; flex:0 0 auto;',
+            onclick:function(){ toggleFilterProj(p.id); }
+          },
+            h('span', { style:'width:12px; height:12px; border-radius:3px; background:' + pc + '; flex:0 0 auto;' }),
+            h('span', { style:'flex:1; text-align:left; font-size:14px; color:oklch(0.34 0.012 260);', text:p.name }),
+            h('span', { style:'width:22px; height:22px; border-radius:6px; display:flex; align-items:center; justify-content:center; font-size:13px; ' +
+              (on ? 'background:' + pc + '; color:#fff;' : 'border:1.5px solid oklch(0.82 0.01 260); color:transparent;') }, on ? '✓' : '')
+          );
+        })
+      ),
+      h('button', { style:'height:44px; margin-top:12px; ' + ghostBtn, onclick:function(){ setState({ filter:[] }, { persist:false }); } }, '絞り込みを解除')
+    )
+  ];
+}
+
+function addModal(){
+  var a = S.add;
+  var dp = a.pj ? proj(a.pj) : null;
+  var nextEnabled = (a.step === 1 && a.pj) || (a.step === 2 && a.title.trim()) || (a.step === 3 && a.u !== null);
+
+  function stepDot(n){
+    return h('span', { style:'width:7px; height:7px; border-radius:50%; background:' +
+      (a.step >= n ? 'oklch(0.4 0.012 260)' : 'oklch(0.85 0.006 260)') + ';' });
+  }
+  function quadBtn(label, sub, u, i){
+    return h('button', { style:quadBtnStyle(a.u === u && a.i === i), onclick:function(){ a.u = u; a.i = i; setState({}, { persist:false }); } },
+      h('b', { style:'font-size:14px;' }, label),
+      h('span', { style:'font-size:11px; opacity:.8;' }, sub)
+    );
+  }
+
+  var body;
+  if(a.step === 1){
+    body = h('div', {},
+      h('span', { style:'font-size:13px; font-weight:700; color:oklch(0.5 0.01 260);' }, '① 案件を選ぶ'),
+      h('div', { style:'display:flex; flex-direction:column; gap:8px; margin-top:12px;' },
+        S.projects.map(function(p){
+          var sel = a.pj === p.id, pc = projColor(p.hue);
+          return h('button', {
+            style:'display:flex; align-items:center; gap:12px; padding:13px 15px; border:1.5px solid ' +
+              (sel ? pc : 'oklch(0.9 0.005 95)') + '; background:' + (sel ? 'oklch(0.98 0.012 260)' : 'oklch(0.99 0.003 90)') +
+              '; border-radius:12px; cursor:pointer;',
+            onclick:function(){ a.pj = p.id; setState({}, { persist:false }); }
+          },
+            h('span', { style:'width:12px; height:12px; border-radius:3px; background:' + pc + '; flex:0 0 auto;' }),
+            h('span', { style:'flex:1; text-align:left; font-size:15px; color:oklch(0.32 0.012 260);', text:p.name }),
+            h('span', { style:'font-size:15px; font-weight:700; color:' + (sel ? pc : 'transparent') + ';' }, '✓')
+          );
+        })
+      ),
+      h('div', { style:'display:flex; gap:8px; margin-top:12px;' },
+        h('input', {
+          value:S.newProjName, placeholder:'＋ 新規案件を追加',
+          style:'flex:1; height:44px; padding:0 14px; border:1px dashed oklch(0.8 0.01 260); border-radius:11px; font-size:14px; background:transparent; color:oklch(0.32 0.012 260); outline:none;',
+          oninput:function(e){ S.newProjName = e.target.value; },
+          onkeydown:function(e){ if(e.key === 'Enter'){ e.preventDefault(); addNewProj(); } }
+        }),
+        h('button', {
+          style:'height:44px; padding:0 18px; border:none; border-radius:11px; font-size:14px; font-weight:700; cursor:pointer; background:oklch(0.4 0.012 260); color:#fff;',
+          onclick:addNewProj
+        }, '追加')
+      )
+    );
+  }else if(a.step === 2){
+    body = h('div', {},
+      h('span', { style:'font-size:13px; font-weight:700; color:oklch(0.5 0.01 260);' }, '② タスク名を入力'),
+      h('div', { style:'display:flex; align-items:center; gap:8px; margin:12px 0;' },
+        h('span', { style:'width:10px; height:10px; border-radius:3px; background:' + projColor(dp.hue) + ';' }),
+        h('span', { style:'font-size:13px; color:oklch(0.5 0.01 260);', text:dp.name })
+      ),
+      h('textarea', {
+        placeholder:'例）実施図面 一式チェック',
+        style:'width:100%; height:110px; padding:14px; border:1px solid oklch(0.86 0.006 95); border-radius:12px; font-size:16px; line-height:1.5; resize:none; color:oklch(0.28 0.012 260); outline:none;',
+        oninput:function(e){ a.title = e.target.value; },
+        ref:function(el){ el.value = a.title; setTimeout(function(){ el.focus(); }, 0); }
+      }),
+      h('span', { style:'font-size:11px; color:oklch(0.65 0.01 260);' }, '短く。1〜2行で収まる長さがおすすめです。')
+    );
+  }else{
+    var chip = dueChip(a.due);
+    body = h('div', {},
+      h('span', { style:'font-size:13px; font-weight:700; color:oklch(0.5 0.01 260);' }, '③ 緊急度・重要度と期限日'),
+      h('div', { style:'display:flex; align-items:center; gap:8px; margin:12px 0 4px; padding:10px 12px; background:oklch(0.965 0.004 90); border-radius:10px;' },
+        h('span', { style:'width:10px; height:10px; border-radius:3px; background:' + projColor(dp.hue) + ';' }),
+        h('span', { style:'font-size:12px; color:oklch(0.55 0.01 260);', text:dp.name }),
+        h('span', { style:'font-size:13px; color:oklch(0.3 0.012 260); font-weight:500; margin-left:2px;', text:a.title })
+      ),
+      h('div', { style:'display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:8px 0 4px;' },
+        quadBtn('すぐやる','重要・緊急',1,1),
+        quadBtn('計画して進める','重要・緊急でない',0,1),
+        quadBtn('さばく・任せる','重要でない・緊急',1,0),
+        quadBtn('後回し','重要でない・緊急でない',0,0)
+      ),
+      h('div', { style:'display:flex; align-items:center; gap:10px; margin-top:12px;' },
+        h('span', { style:'font-size:13px; color:oklch(0.5 0.01 260);' }, '期限日'),
+        h('input', {
+          type:'date', value:a.due,
+          style:'height:44px; padding:0 12px; border:1px solid oklch(0.86 0.006 95); border-radius:11px; font-size:15px; color:oklch(0.3 0.012 260); outline:none;',
+          oninput:function(e){ a.due = e.target.value; setState({}, { persist:false }); }
+        }),
+        h('span', { style:chip.style, text:chip.text })
+      )
+    );
+  }
+
+  return h('div', { style:'position:absolute; inset:0; background:oklch(0.2 0.01 260 / 0.34); z-index:60; display:flex; align-items:center; justify-content:center;', onclick:closeAdd },
+    h('div', {
+      style:'width:520px; max-width:92%; background:oklch(0.99 0.004 90); border-radius:20px; overflow:hidden; box-shadow:0 40px 90px -30px oklch(0.2 0.02 260 / 0.6); display:flex; flex-direction:column; animation:modalIn .2s ease;',
+      onclick:function(e){ e.stopPropagation(); }
+    },
+      h('div', { style:'display:flex; align-items:center; gap:12px; padding:18px 22px 14px;' },
+        h('span', { style:'font-size:17px; font-weight:700; color:oklch(0.32 0.012 260);' }, 'タスクを追加'),
+        spacer(),
+        h('div', { style:'display:flex; gap:6px; align-items:center;' }, stepDot(1), stepDot(2), stepDot(3)),
+        h('button', { style:'border:none; background:transparent; font-size:20px; color:oklch(0.55 0.01 260); cursor:pointer; margin-left:6px;', onclick:closeAdd }, '✕')
+      ),
+      h('div', { style:'padding:4px 22px 6px; min-height:250px;' }, body),
+      h('div', { style:'display:flex; align-items:center; gap:10px; padding:14px 22px 20px;' },
+        h('button', { style:'height:44px; padding:0 22px; ' + ghostBtn, onclick:addBack }, '戻る'),
+        spacer(),
+        h('button', {
+          style:'height:44px; padding:0 26px; border:none; border-radius:12px; font-size:15px; font-weight:700; cursor:' +
+            (nextEnabled ? 'pointer' : 'not-allowed') + '; background:' +
+            (nextEnabled ? 'oklch(0.34 0.012 260)' : 'oklch(0.85 0.006 260)') + '; color:' +
+            (nextEnabled ? 'oklch(0.98 0.004 90)' : 'oklch(0.65 0.008 260)') + ';',
+          onclick:addNext
+        }, a.step === 3 ? '追加する' : '次へ')
+      )
+    )
+  );
+}
+
+function editModal(){
+  var e = S.edit;
+  var chip = dueChip(e.due);
+  function quadBtn(label, sub, u, i){
+    return h('button', { style:quadBtnStyle(e.u === u && e.i === i), onclick:function(){ e.u = u; e.i = i; setState({}, { persist:false }); } },
+      h('b', { style:'font-size:14px;' }, label),
+      h('span', { style:'font-size:11px; opacity:.8;' }, sub)
+    );
+  }
+  return h('div', { style:'position:absolute; inset:0; background:oklch(0.2 0.01 260 / 0.34); z-index:62; display:flex; align-items:center; justify-content:center;', onclick:closeEdit },
+    h('div', {
+      style:'width:520px; max-width:92%; max-height:92%; overflow-y:auto; background:oklch(0.99 0.004 90); border-radius:20px; box-shadow:0 40px 90px -30px oklch(0.2 0.02 260 / 0.6); display:flex; flex-direction:column; animation:modalIn .2s ease;',
+      onclick:function(ev){ ev.stopPropagation(); }
+    },
+      h('div', { style:'display:flex; align-items:center; gap:12px; padding:18px 22px 6px;' },
+        h('span', { style:'font-size:17px; font-weight:700; color:oklch(0.32 0.012 260);' }, 'タスクを編集'),
+        spacer(),
+        h('button', { style:'border:none; background:transparent; font-size:20px; color:oklch(0.55 0.01 260); cursor:pointer;', onclick:closeEdit }, '✕')
+      ),
+      h('div', { style:'padding:8px 22px 4px; display:flex; flex-direction:column; gap:16px;' },
+        h('div', {},
+          h('span', { style:'font-size:12px; font-weight:700; color:oklch(0.5 0.01 260);' }, '案件'),
+          h('div', { style:'display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;' },
+            S.projects.map(function(p){
+              var sel = e.pj === p.id, pc = projColor(p.hue);
+              return h('button', {
+                style:'display:flex; align-items:center; gap:7px; padding:9px 14px; border:1.5px solid ' +
+                  (sel ? pc : 'oklch(0.9 0.005 95)') + '; background:' + (sel ? 'oklch(0.98 0.012 260)' : 'oklch(0.99 0.003 90)') +
+                  '; border-radius:999px; cursor:pointer; font-size:13px; font-weight:' + (sel ? '700' : '500') + '; color:oklch(0.34 0.012 260);',
+                onclick:function(){ e.pj = p.id; setState({}, { persist:false }); }
+              },
+                h('span', { style:'width:9px; height:9px; border-radius:3px; background:' + pc + '; flex:0 0 auto;' }),
+                p.name
+              );
+            })
+          )
+        ),
+        h('div', {},
+          h('span', { style:'font-size:12px; font-weight:700; color:oklch(0.5 0.01 260);' }, 'タスク名'),
+          h('textarea', {
+            style:'width:100%; height:80px; margin-top:8px; padding:12px 14px; border:1px solid oklch(0.86 0.006 95); border-radius:12px; font-size:15px; line-height:1.5; resize:none; color:oklch(0.28 0.012 260); outline:none;',
+            oninput:function(ev){ e.title = ev.target.value; },
+            ref:function(el){ el.value = e.title; }
+          })
+        ),
+        h('div', {},
+          h('span', { style:'font-size:12px; font-weight:700; color:oklch(0.5 0.01 260);' }, '緊急度・重要度'),
+          h('div', { style:'display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:8px;' },
+            quadBtn('すぐやる','重要・緊急',1,1),
+            quadBtn('計画して進める','重要・緊急でない',0,1),
+            quadBtn('さばく・任せる','重要でない・緊急',1,0),
+            quadBtn('後回し','重要でない・緊急でない',0,0)
+          )
+        ),
+        h('div', { style:'display:flex; align-items:center; gap:10px;' },
+          h('span', { style:'font-size:12px; font-weight:700; color:oklch(0.5 0.01 260);' }, '期限日'),
+          h('input', {
+            type:'date', value:e.due,
+            style:'height:44px; padding:0 12px; border:1px solid oklch(0.86 0.006 95); border-radius:11px; font-size:15px; color:oklch(0.3 0.012 260); outline:none;',
+            oninput:function(ev){ e.due = ev.target.value; setState({}, { persist:false }); }
+          }),
+          h('span', { style:chip.style, text:chip.text })
+        )
+      ),
+      h('div', { style:'display:flex; align-items:center; gap:10px; padding:16px 22px 20px;' },
+        h('button', { style:'height:44px; padding:0 18px; border:1px solid oklch(0.78 0.09 30); background:transparent; border-radius:12px; font-size:14px; color:oklch(0.55 0.14 30); cursor:pointer;', onclick:deleteFromEdit }, '削除'),
+        spacer(),
+        h('button', { style:ghostBtn, onclick:closeEdit }, 'キャンセル'),
+        h('button', { style:'height:44px; padding:0 26px; border:none; border-radius:12px; font-size:15px; font-weight:700; cursor:pointer; background:oklch(0.34 0.012 260); color:oklch(0.98 0.004 90);', onclick:saveEdit }, '保存')
+      )
+    )
+  );
+}
+
+function settingsModal(){
+  var backed = S.backedUpAt
+    ? new Date(S.backedUpAt).toLocaleDateString('ja-JP', { year:'numeric', month:'long', day:'numeric' })
+    : null;
+  var active = S.tasks.filter(function(t){ return !t.arch; }).length;
+  var archived = S.tasks.length - active;
+
+  function label(t){ return h('span', { style:'font-size:12px; font-weight:700; color:oklch(0.5 0.01 260);' }, t); }
+  function note(t){ return h('span', { style:'font-size:11px; line-height:1.6; color:oklch(0.6 0.01 260);' }, t); }
+
+  var fileInput = h('input', {
+    type:'file', accept:'application/json,.json',
+    style:'display:none;',
+    onchange:function(e){ if(e.target.files && e.target.files[0]) importData(e.target.files[0]); }
+  });
+
+  return h('div', { style:'position:absolute; inset:0; background:oklch(0.2 0.01 260 / 0.34); z-index:64; display:flex; align-items:center; justify-content:center;', onclick:function(){ setState({ settingsOpen:false }, { persist:false }); } },
+    h('div', {
+      style:'width:480px; max-width:92%; max-height:92%; overflow-y:auto; background:oklch(0.99 0.004 90); border-radius:20px; box-shadow:0 40px 90px -30px oklch(0.2 0.02 260 / 0.6); display:flex; flex-direction:column; animation:modalIn .2s ease;',
+      onclick:function(e){ e.stopPropagation(); }
+    },
+      h('div', { style:'display:flex; align-items:center; gap:12px; padding:18px 22px 6px;' },
+        h('span', { style:'font-size:17px; font-weight:700; color:oklch(0.32 0.012 260);' }, '設定・バックアップ'),
+        spacer(),
+        h('button', { style:'border:none; background:transparent; font-size:20px; color:oklch(0.55 0.01 260); cursor:pointer;', onclick:function(){ setState({ settingsOpen:false }, { persist:false }); } }, '✕')
+      ),
+      h('div', { style:'padding:10px 22px 4px; display:flex; flex-direction:column; gap:20px;' },
+
+        h('div', {},
+          label('表示名'),
+          h('input', {
+            value:S.owner, placeholder:'例）田中 / 設計チーム',
+            style:'width:100%; height:44px; margin-top:8px; padding:0 14px; border:1px solid oklch(0.86 0.006 95); border-radius:11px; font-size:15px; color:oklch(0.3 0.012 260); outline:none; background:transparent;',
+            oninput:function(e){ S.owner = e.target.value; save(); }
+          }),
+          h('div', { style:'margin-top:6px;' }, note('画面左上に表示されます。このボードはこの端末専用で、他のメンバーからは見えません。'))
+        ),
+
+        h('div', {},
+          label('データのバックアップ'),
+          h('div', { style:'margin:8px 0 10px;' },
+            note('タスクはこの端末のブラウザ内だけに保存されています。iPadを買い替えるときや、'
+               + 'Safariの履歴・データ消去をする前には必ず書き出してください。')),
+          h('div', { style:'display:flex; gap:8px; flex-wrap:wrap;' },
+            h('button', {
+              style:'height:44px; padding:0 20px; border:none; border-radius:12px; font-size:14px; font-weight:700; cursor:pointer; background:oklch(0.34 0.012 260); color:oklch(0.98 0.004 90);',
+              onclick:exportData
+            }, '書き出す（JSON）'),
+            h('button', { style:ghostBtn, onclick:function(){ fileInput.click(); } }, 'ファイルから復元')
+          ),
+          fileInput,
+          h('div', { style:'margin-top:10px; padding:10px 12px; background:oklch(0.965 0.004 90); border-radius:10px;' },
+            h('span', { style:'font-size:11px; color:oklch(0.55 0.01 260); line-height:1.7; white-space:pre-line;',
+              text:'案件 ' + S.projects.length + '件 ／ 未完了 ' + active + '件 ／ アーカイブ ' + archived + '件\n'
+                 + '最終バックアップ: ' + (backed || 'まだありません') })
+          )
+        ),
+
+        h('div', {},
+          label('アプリ情報'),
+          h('div', { style:'margin-top:8px; display:flex; align-items:center; gap:10px;' },
+            h('span', { style:'font-size:13px; color:oklch(0.45 0.01 260); font-variant-numeric:tabular-nums;', text:'バージョン ' + APP_VERSION }),
+            spacer(),
+            h('button', {
+              style:'height:38px; padding:0 16px; border:1px solid oklch(0.88 0.005 95); background:transparent; border-radius:10px; font-size:13px; color:oklch(0.45 0.01 260); cursor:pointer;',
+              onclick:checkForUpdate
+            }, '更新を確認')
+          ),
+          h('div', { style:'margin-top:6px;' }, note('ホーム画面に追加しておくと、電波のない場所でも開けます。'))
+        )
+      ),
+      h('div', { style:'display:flex; align-items:center; padding:16px 22px 20px;' },
+        spacer(),
+        h('button', {
+          style:'height:44px; padding:0 26px; border:none; border-radius:12px; font-size:15px; font-weight:700; cursor:pointer; background:oklch(0.34 0.012 260); color:oklch(0.98 0.004 90);',
+          onclick:function(){ setState({ settingsOpen:false }); }
+        }, '閉じる')
+      )
+    )
+  );
+}
+
+function updateBar(){
+  return h('div', { style:'position:absolute; bottom:22px; left:50%; transform:translateX(-50%); z-index:82; animation:toastIn .22s ease; display:flex; align-items:center; gap:16px; padding:12px 14px 12px 20px; background:oklch(0.55 0.11 250); color:oklch(0.99 0.01 250); border-radius:13px; box-shadow:0 18px 40px -16px oklch(0.2 0.02 260 / 0.6);' },
+    h('span', { style:'font-size:14px; font-weight:700;' }, '新しいバージョンがあります'),
+    h('button', {
+      style:'padding:6px 16px; border:none; background:oklch(0.99 0.01 250); color:oklch(0.4 0.11 250); border-radius:9px; font-size:13px; font-weight:700; cursor:pointer;',
+      onclick:applyUpdate
+    }, '更新')
+  );
+}
+
+function archiveScreen(){
+  var rows = S.tasks.filter(function(t){ return t.arch; });
+  return h('div', { style:'position:absolute; inset:0; background:oklch(0.97 0.005 90); z-index:70; display:flex; flex-direction:column;' },
+    h('div', { style:'height:66px; flex:0 0 66px; display:flex; align-items:center; gap:12px; padding:0 22px; border-bottom:1px solid oklch(0.9 0.005 95);' },
+      h('button', { style:'border:none; background:transparent; font-size:15px; color:oklch(0.45 0.01 260); cursor:pointer; display:flex; align-items:center; gap:6px;', onclick:function(){ setState({ archiveOpen:false }, { persist:false }); } },
+        h('span', { style:'font-size:18px;' }, '‹'), 'ボードに戻る'),
+      spacer(),
+      h('span', { style:'font-size:16px; font-weight:700; color:oklch(0.34 0.012 260);' }, '🗄 アーカイブ'),
+      spacer(),
+      h('span', { style:'font-size:12px; color:oklch(0.6 0.01 260); font-variant-numeric:tabular-nums; width:120px; text-align:right;', text:rows.length + '件' })
+    ),
+    h('div', { style:'flex:1; min-height:0; overflow-y:auto; padding:18px 22px; display:flex; flex-direction:column; gap:8px;' },
+      rows.map(function(t){
+        var v = cardVisuals(t);
+        return h('div', { style:'display:flex; align-items:center; gap:12px; padding:12px 16px; background:oklch(0.985 0.004 90); border:1px solid oklch(0.91 0.005 95); border-radius:11px; flex:0 0 auto;' },
+          h('div', { style:'flex:0 0 5px; align-self:stretch; background:' + v.pc + '; border-radius:5px;' }),
+          h('span', { style:v.projText, text:v.p.name }),
+          h('span', { style:'flex:0 1 auto; font-size:15px; color:oklch(0.55 0.01 260); text-decoration:line-through; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;', text:t.t }),
+          spacer(),
+          h('span', { style:'font-size:12px; color:oklch(0.62 0.01 260);', text:fmtDue(t.due) }),
+          h('button', { style:'padding:6px 12px; border:1px solid oklch(0.86 0.006 95); background:transparent; border-radius:9px; font-size:12px; color:oklch(0.45 0.01 260); cursor:pointer;', onclick:function(){ restoreTask(t.id); } }, '戻す')
+        );
+      }),
+      rows.length === 0 ? h('span', { style:'font-size:13px; color:oklch(0.7 0.008 260); padding:8px 2px;' }, '完了済みのタスクはまだありません。') : null
+    )
+  );
+}
+
+function toastEl(){
+  return h('div', { style:'position:absolute; bottom:22px; left:50%; transform:translateX(-50%); z-index:80; animation:toastIn .22s ease; display:flex; align-items:center; gap:16px; padding:12px 14px 12px 20px; background:oklch(0.28 0.006 260); color:oklch(0.97 0.004 90); border-radius:13px; box-shadow:0 18px 40px -16px oklch(0.2 0.02 260 / 0.6);' },
+    h('span', { style:'font-size:14px;', text:S.toast.text }),
+    S.toast.undo ? h('button', {
+      style:'padding:6px 14px; border:none; background:oklch(0.55 0.11 250); color:oklch(0.99 0.01 250); border-radius:9px; font-size:13px; font-weight:700; cursor:pointer;',
+      onclick:function(){ var u = S.toast && S.toast.undo; setState({ toast:null }, { persist:false }); if(u) u(); }
+    }, '取り消し') : null
+  );
+}
+
+/* ============================================================
+   ルート描画
+   ============================================================ */
+var root = document.getElementById('app');
+var inkRestored = false;
+
+function render(){
+  root.textContent = '';
+
+  var canvas = ensureCanvas();
+  canvas.style.cssText = 'position:absolute; left:0; top:0; width:100%; height:100%; z-index:' +
+    (S.penOn ? 30 : 5) + '; visibility:' + (S.penOn ? 'visible' : 'hidden') +
+    '; touch-action:none; cursor:crosshair;';
+
+  var content = h('div', { style:'position:relative; flex:1; min-height:0;' },
+    S.view === 'matrix' ? matrixView() : listView(),
+    canvas,
+    S.penOn ? penToolbar() : null
+  );
+
+  root.appendChild(topBar());
+  root.appendChild(content);
+
+  if(S.penOn){
+    root.appendChild(h('div', { style:'position:absolute; top:74px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:8px; padding:6px 16px; background:oklch(0.55 0.11 250); color:oklch(0.99 0.01 250); border-radius:999px; font-size:12px; font-weight:700; z-index:41; box-shadow:0 6px 18px -6px oklch(0.55 0.11 250 / 0.6);' }, '✎ 手書きモード'));
+  }
+  if(S.filterOpen) filterDrawer().forEach(function(n){ root.appendChild(n); });
+  if(S.add)         root.appendChild(addModal());
+  if(S.edit)        root.appendChild(editModal());
+  if(S.settingsOpen)root.appendChild(settingsModal());
+  if(S.archiveOpen) root.appendChild(archiveScreen());
+  if(S.toast)       root.appendChild(toastEl());
+  if(S.updateReady) root.appendChild(updateBar());
+
+  // キャンバスはDOMに入った後でないと実寸が取れない
+  requestAnimationFrame(function(){
+    canvas._sizeToBox();
+    if(!inkRestored && S.ink){ inkRestored = true; canvas._restore(S.ink); }
+  });
+}
+
+window.addEventListener('resize', function(){
+  if(canvasEl) requestAnimationFrame(function(){ canvasEl._sizeToBox(); });
+});
+window.addEventListener('pointerup', function(){ if(swipe) swUp(); });
+
+/* ============================================================
+   Service Worker
+   ホーム画面に追加したあとオフラインで起動できるようにし、
+   再デプロイ時は「更新」バーを出してから切り替える（勝手にリロードしない）。
+   ============================================================ */
+var swReg = null;
+function watchWaiting(reg){
+  if(reg.waiting && navigator.serviceWorker.controller){
+    setState({ updateReady:true }, { persist:false });
+  }
+  reg.addEventListener('updatefound', function(){
+    var nw = reg.installing;
+    if(!nw) return;
+    nw.addEventListener('statechange', function(){
+      if(nw.state === 'installed' && navigator.serviceWorker.controller){
+        setState({ updateReady:true }, { persist:false });
+      }
+    });
+  });
+}
+function applyUpdate(){
+  if(swReg && swReg.waiting){
+    swReg.waiting.postMessage({ type:'SKIP_WAITING' });
+  }else{
+    location.reload();
+  }
+}
+function checkForUpdate(){
+  if(!swReg){ alert('この環境では自動更新は使えません。Safariでページを再読み込みしてください。'); return; }
+  swReg.update().then(function(){
+    setTimeout(function(){
+      if(!S.updateReady) showToast('最新版を使っています', null);
+    }, 800);
+  }).catch(function(){
+    showToast('更新を確認できませんでした', null);
+  });
+}
+if('serviceWorker' in navigator && location.protocol.indexOf('http') === 0){
+  window.addEventListener('load', function(){
+    navigator.serviceWorker.register('./sw.js').then(function(reg){
+      swReg = reg;
+      watchWaiting(reg);
+    }).catch(function(){ /* 登録できなくてもアプリ自体は動く */ });
+  });
+  var reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', function(){
+    if(reloading) return;
+    reloading = true;
+    location.reload();
+  });
+}
+
+render();
+})();
+</script>
+</body>
+</html>
