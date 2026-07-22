@@ -64,7 +64,6 @@ function iso(d){
     String(d.getMonth()+1).padStart(2,'0') + '-' +
     String(d.getDate()).padStart(2,'0');
 }
-function plusDays(n){ var d = today(); d.setDate(d.getDate()+n); return d; }
 function daysTo(due){ return Math.round((new Date(due+'T00:00:00') - today()) / 86400000); }
 function todayLabel(){
   var d = today(), w = ['日','月','火','水','木','金','土'][d.getDay()];
@@ -124,32 +123,10 @@ function spacer(){ return h('span', { style:'flex:1;' }); }
 /* ============================================================
    永続化
    ============================================================ */
+/* 初回起動は空のボードから。案件もタスクも各自がゼロから登録する。
+   （サンプルを実案件と取り違えるのを避けるため、あえて何も入れない） */
 function seed(){
-  var P = [
-    { id:'p1', name:'大手町オフィス改修', hue:250 },
-    { id:'p2', name:'世田谷 K邸 新築',    hue:150 },
-    { id:'p3', name:'中央区 集合住宅',    hue:308 },
-    { id:'p4', name:'市民美術館 コンペ',  hue:196 }
-  ];
-  var T = [
-    ['t1', 'p1','実施図面 一式チェック',   1,1,  0],
-    ['t2', 'p4','コンペ提案書 レイアウト', 1,1,  2],
-    ['t3', 'p2','構造事務所と打合せ調整',  1,1, -1],
-    ['t4', 'p1','断面詳細図の修正',        1,1,  4],
-    ['t5', 'p2','設備プロット確認',        1,1,  3],
-    ['t6', 'p4','コンペ参加登録',          1,1,  5],
-    ['t7', 'p3','外装仕上げの検討',        0,1, 19],
-    ['t8', 'p2','プレゼン用CGの発注',      0,1, 12],
-    ['t9', 'p1','省エネ計算の更新',        0,1,  8],
-    ['t10','p3','確認申請 書類の収集',     1,0,  1],
-    ['t11','p4','模型材料の発注',          1,0,  0],
-    ['t12','p3','近隣説明 資料の印刷',     1,0,  3],
-    ['t13','p1','議事録の送付',            0,0,  6],
-    ['t14','p2','家具カタログの取り寄せ',  0,0, 24]
-  ].map(function(r){
-    return { id:r[0], pj:r[1], t:r[2], u:r[3], i:r[4], due:iso(plusDays(r[5])), done:false, arch:false };
-  });
-  return { projects:P, tasks:T };
+  return { projects:[], tasks:[] };
 }
 function load(){
   try{
@@ -1078,6 +1055,25 @@ function settingsModal(){
   );
 }
 
+/* 空のボード向けの案内。初回起動時と、タスクを片付けきったときに出る */
+function emptyHint(){
+  var first = S.projects.length === 0;
+  return h('div', { style:'position:absolute; inset:0; display:flex; align-items:center; justify-content:center; z-index:8; pointer-events:none;' },
+    h('div', { style:'display:flex; flex-direction:column; align-items:center; gap:14px; padding:28px 34px; background:oklch(0.99 0.004 90 / 0.94); border:1px solid oklch(0.91 0.005 95); border-radius:16px; box-shadow:0 18px 40px -24px oklch(0.2 0.02 260 / 0.35); pointer-events:auto;' },
+      h('span', { style:'font-size:15px; font-weight:700; color:oklch(0.34 0.012 260);',
+        text:first ? 'ボードはまだ空です' : 'いまやるべきタスクはありません' }),
+      h('span', { style:'font-size:12px; line-height:1.7; color:oklch(0.58 0.01 260); text-align:center; white-space:pre-line;',
+        text:first
+          ? '「＋タスク」から、案件名 → タスク名 → 緊急度・重要度の順に登録します。\n案件は最初のタスクを追加するときに作れます。'
+          : 'お疲れさまでした。完了したタスクは「🗄」から確認できます。' }),
+      first ? h('button', {
+        style:'height:44px; padding:0 22px 0 18px; display:flex; align-items:center; gap:6px; border:none; background:oklch(0.34 0.012 260); color:oklch(0.98 0.004 90); border-radius:12px; font-size:15px; font-weight:700; cursor:pointer;',
+        onclick:openAdd
+      }, h('span', { style:'font-size:20px; font-weight:400; margin-top:-2px;' }, '＋'), '最初のタスクを追加') : null
+    )
+  );
+}
+
 function updateBar(){
   return h('div', { style:'position:absolute; bottom:22px; left:50%; transform:translateX(-50%); z-index:82; animation:toastIn .22s ease; display:flex; align-items:center; gap:16px; padding:12px 14px 12px 20px; background:oklch(0.55 0.11 250); color:oklch(0.99 0.01 250); border-radius:13px; box-shadow:0 18px 40px -16px oklch(0.2 0.02 260 / 0.6);' },
     h('span', { style:'font-size:14px; font-weight:700;' }, '新しいバージョンがあります'),
@@ -1142,6 +1138,7 @@ function render(){
 
   var content = h('div', { style:'position:relative; flex:1; min-height:0;' },
     S.view === 'matrix' ? matrixView() : listView(),
+    (activeTasks().length === 0 && S.filter.length === 0 && !S.penOn) ? emptyHint() : null,
     canvas,
     S.penOn ? penToolbar() : null
   );
