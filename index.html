@@ -30,11 +30,6 @@
   @keyframes modalIn{ from{ opacity:0; transform:translateY(10px) scale(.985);} to{ opacity:1; transform:translateY(0) scale(1);} }
   /* 縦向き・狭幅ではボタンのラベルを畳んでアイコンのみに */
   @media (max-width:900px){ .btn-label{ display:none; } }
-  /* 手書き中は下の文字が選択されないようにする。
-     長い線を引いたときに範囲選択が始まってしまうのを防ぐ */
-  body.pen-on, body.pen-on *{
-    -webkit-user-select:none; user-select:none; -webkit-touch-callout:none;
-  }
 </style>
 </head>
 <body>
@@ -46,7 +41,7 @@
 /* ============================================================
    定数
    ============================================================ */
-var APP_VERSION = '1.2.1';    // 更新時は sw.js の CACHE も同じ値に上げること
+var APP_VERSION = '1.3.0';    // 更新時は sw.js の CACHE も同じ値に上げること
 var STORE_KEY = 'lrt-task-board-v1';
 var CARD_CAP  = 4;            // 各象限の既定表示件数（超過分は折りたたむ）
 var ARCHIVE_DELAY = 4200;     // 完了 → 自動アーカイブまで(ms)
@@ -160,15 +155,18 @@ function load(){
     s1.loadError = 'broken';
     return s1;
   }
+  // v1.2.1 以前の手書きデータ（ink）は読み飛ばす。
+  // 次回の保存で自動的に消え、容量も解放される
   return {
-    projects:d.projects, tasks:d.tasks, ink:d.ink || null,
-    owner:d.owner || '', backedUpAt:d.backedUpAt || null
+    projects:d.projects, tasks:d.tasks,
+    owner:d.owner || '', backedUpAt:d.backedUpAt || null,
+    hadInk: !!d.ink
   };
 }
 function snapshot(){
   return {
     app:'lrt-task-board', version:APP_VERSION, savedAt:new Date().toISOString(),
-    owner:S.owner, projects:S.projects, tasks:S.tasks, ink:S.ink || null,
+    owner:S.owner, projects:S.projects, tasks:S.tasks,
     backedUpAt:S.backedUpAt || null
   };
 }
@@ -192,11 +190,9 @@ var S = {
   view:'matrix',
   projects:boot.projects,
   tasks:boot.tasks,
-  ink:boot.ink || null,
   owner:boot.owner || '',
   backedUpAt:boot.backedUpAt || null,
   filter:[], sort:'due', expanded:{},
-  penOn:false, pen:{ tool:'pen', color:'#33373f' },
   filterOpen:false, archiveOpen:false, settingsOpen:false,
   add:null, edit:null, newProjName:'',
   updateReady:false,
@@ -204,11 +200,13 @@ var S = {
   saveError:null,                     // 保存できていない
   toast:null
 };
+// 手書き廃止前のデータが残っていれば、この起動で ink を落として保存し直す
+if(boot.hadInk) save();
+
 var timers = {};      // 完了 → アーカイブ の予約
 var toastTimer = null;
 var swipe = null;     // スワイプ中の一時状態
 var justSwiped = false;
-var canvasEl = null;  // 手書きレイヤー（再描画をまたいで使い回す）
 
 function setState(patch, opts){
   Object.assign(S, patch);
@@ -373,7 +371,6 @@ function deleteFromEdit(){
 
 /* ---- 表示切替 ---- */
 function setView(v){ setState({ view:v, archiveOpen:false }, { persist:false }); }
-function togglePen(){ setState({ penOn:!S.penOn }, { persist:false }); }
 function toggleFilter(){ setState({ filterOpen:!S.filterOpen }, { persist:false }); }
 function toggleFilterProj(id){
   setState({
@@ -387,87 +384,6 @@ function toggleExpand(k){
   setState({}, { persist:false });
 }
 
-/* ============================================================
-   手書きレイヤー（ボード全体に重なる独立キャンバス）
-   ============================================================ */
-function clearSelection(){
-  try{
-    var s = window.getSelection();
-    if(s && !s.isCollapsed) s.removeAllRanges();
-  }catch(e){}
-}
-function ensureCanvas(){
-  if(canvasEl) return canvasEl;
-  var node = document.createElement('canvas');
-  canvasEl = node;
-  var ctx = node.getContext('2d');
-  var drawing = false, last = null;
-
-  function sizeToBox(){
-    var r = node.getBoundingClientRect();
-    if(!r.width || !r.height) return;
-    var w = Math.round(r.width), hh = Math.round(r.height);
-    if(node.width === w && node.height === hh) return;
-    var prev = node.width ? node.toDataURL() : null;
-    node.width = w; node.height = hh;
-    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    if(prev) restore(prev);
-  }
-  function restore(dataUrl){
-    var img = new Image();
-    img.onload = function(){ ctx.drawImage(img, 0, 0, node.width, node.height); };
-    img.src = dataUrl;
-  }
-  function pt(e){
-    var r = node.getBoundingClientRect();
-    return {
-      x:(e.clientX - r.left) * (node.width / r.width),
-      y:(e.clientY - r.top)  * (node.height / r.height)
-    };
-  }
-  /* 既定の選択・ドラッグ動作を止める。
-     止めないと、長い線を引いたときに下の文字の範囲選択が始まってしまう */
-  node.addEventListener('selectstart', function(e){ e.preventDefault(); });
-  node.addEventListener('dragstart', function(e){ e.preventDefault(); });
-
-  node.addEventListener('pointerdown', function(e){
-    if(!S.penOn) return;
-    e.preventDefault();
-    clearSelection();
-    drawing = true; last = pt(e);
-    try{ node.setPointerCapture(e.pointerId); }catch(_){}
-  });
-  node.addEventListener('pointermove', function(e){
-    if(!drawing) return;
-    e.preventDefault();
-    var p = pt(e);
-    ctx.globalCompositeOperation = S.pen.tool === 'erase' ? 'destination-out' : 'source-over';
-    ctx.strokeStyle = S.pen.color;
-    ctx.lineWidth = S.pen.tool === 'erase' ? 26 : 3;
-    ctx.beginPath(); ctx.moveTo(last.x, last.y); ctx.lineTo(p.x, p.y); ctx.stroke();
-    last = p;
-  });
-  function end(){
-    if(!drawing) return;
-    drawing = false;
-    S.ink = node.toDataURL();
-    save();
-  }
-  node.addEventListener('pointerup', end);
-  node.addEventListener('pointercancel', end);
-
-  node._sizeToBox = sizeToBox;
-  node._restore = restore;
-  node._ctx = ctx;
-  return node;
-}
-function penClear(){
-  if(!canvasEl) return;
-  canvasEl._ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
-  setState({ ink:null });
-}
-function setTool(tool){ S.pen.tool = tool; setState({}, { persist:false }); }
-function setColor(color){ S.pen = { tool:'pen', color:color }; setState({}, { persist:false }); }
 
 /* ============================================================
    バックアップ（書き出し / 読み込み）
@@ -506,13 +422,12 @@ function importData(file){
                 '案件 ' + d.projects.length + '件 / 未完了タスク ' + n + '件\n\n' +
                 '※ いまボードにあるタスクは戻せません。')) return;
     Object.keys(timers).forEach(clearArchiveTimer);
-    inkRestored = false;
+    // 旧バージョンのバックアップに含まれる ink（手書き）は読み飛ばす
     setState({
-      projects:d.projects, tasks:d.tasks, ink:d.ink || null,
+      projects:d.projects, tasks:d.tasks,
       owner:d.owner || S.owner, backedUpAt:d.backedUpAt || null,
       filter:[], expanded:{}, settingsOpen:false, toast:null
     });
-    if(canvasEl){ canvasEl._ctx.clearRect(0,0,canvasEl.width,canvasEl.height); }
     showToast('バックアップを読み込みました', null);
   };
   reader.readAsText(file);
@@ -666,7 +581,6 @@ function topBar(){
     ),
     spacer(),
     filterButton(),
-    penButton(),
     h('button', { style:iconBtn, title:'アーカイブ', onclick:function(){ setState({ archiveOpen:true }, { persist:false }); } }, '🗄'),
     h('button', { style:iconBtn, title:'設定・バックアップ', onclick:function(){ setState({ settingsOpen:true }, { persist:false }); } }, '⚙'),
     h('button', {
@@ -688,16 +602,6 @@ function filterButton(){
     h('span', { 'class':'btn-label' }, '絞り込み'),
     on ? h('span', { style:'margin-left:2px; min-width:18px; height:18px; padding:0 5px; display:inline-flex; align-items:center; justify-content:center; background:oklch(0.55 0.11 250); color:#fff; border-radius:9px; font-size:11px; font-weight:700;', text:String(S.filter.length) }) : null
   );
-}
-function penButton(){
-  return h('button', {
-    style:'height:44px; padding:0 16px; display:flex; align-items:center; gap:6px; border:1px solid ' +
-      (S.penOn ? 'oklch(0.55 0.11 250)' : 'oklch(0.88 0.005 95)') + '; background:' +
-      (S.penOn ? 'oklch(0.55 0.11 250)' : 'oklch(0.99 0.003 90)') + '; color:' +
-      (S.penOn ? '#fff' : 'oklch(0.4 0.01 260)') + '; border-radius:12px; font-size:14px; font-weight:' +
-      (S.penOn ? '700' : '500') + '; cursor:pointer;',
-    onclick:togglePen
-  }, '✎', h('span', { 'class':'btn-label' }, '手書き'));
 }
 
 function matrixView(){
@@ -771,32 +675,6 @@ function listView(){
   );
 }
 
-function penToolbar(){
-  function toolBtn(icon, tool){
-    var on = S.pen.tool === tool;
-    return h('button', {
-      style:'width:38px; height:38px; border:none; border-radius:10px; font-size:16px; cursor:pointer; background:' +
-        (on ? 'oklch(0.55 0.11 250)' : 'oklch(0.36 0.008 260)') + '; color:oklch(0.95 0.006 260);',
-      onclick:function(){ setTool(tool); }
-    }, icon);
-  }
-  function swatch(hex){
-    var on = S.pen.tool === 'pen' && S.pen.color === hex;
-    return h('button', {
-      style:'width:30px; height:30px; border-radius:50%; cursor:pointer; background:' + hex + '; border:2.5px solid ' +
-        (on ? 'oklch(0.95 0.006 260)' : 'transparent') + '; box-shadow:' + (on ? '0 0 0 1.5px ' + hex : 'none') + ';',
-      onclick:function(){ setColor(hex); }
-    });
-  }
-  var div = h('div', { style:'width:1px; height:24px; background:oklch(0.42 0.008 260); margin:0 4px;' });
-  return h('div', { style:'position:absolute; bottom:20px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:6px; padding:8px; background:oklch(0.28 0.006 260); border-radius:16px; box-shadow:0 14px 34px -12px oklch(0.2 0.02 260 / 0.6); z-index:40;' },
-    toolBtn('✎','pen'), toolBtn('⌫','erase'),
-    div,
-    swatch('#33373f'), swatch('#c2472f'), swatch('#2f5bb0'),
-    h('div', { style:'width:1px; height:24px; background:oklch(0.42 0.008 260); margin:0 4px;' }),
-    h('button', { style:'height:38px; padding:0 14px; border:none; background:transparent; color:oklch(0.85 0.006 260); font-size:13px; cursor:pointer;', onclick:penClear }, '全消去')
-  );
-}
 
 function filterDrawer(){
   return [
@@ -1108,7 +986,7 @@ function alertBar(){
   var msg, detail;
   if(S.saveError === 'quota'){
     msg = '保存できていません（容量がいっぱいです）';
-    detail = '手書きの書き込みを「全消去」するか、⚙から書き出して整理してください。';
+    detail = '⚙から書き出したうえで、不要なタスクを削除して整理してください。';
   }else if(S.saveError){
     msg = '保存できていません';
     detail = 'プライベートブラウズ中の可能性があります。通常のタブで開き直してください。';
@@ -1202,34 +1080,19 @@ function toastEl(){
    ルート描画
    ============================================================ */
 var root = document.getElementById('app');
-var inkRestored = false;
 
 function render(){
   root.textContent = '';
 
-  // 手書き中だけ選択を殺す（常時 none にすると通常時のコピーができなくなる）
-  if(S.penOn){ document.body.classList.add('pen-on'); clearSelection(); }
-  else{ document.body.classList.remove('pen-on'); }
-
-  var canvas = ensureCanvas();
-  canvas.style.cssText = 'position:absolute; left:0; top:0; width:100%; height:100%; z-index:' +
-    (S.penOn ? 30 : 5) + '; visibility:' + (S.penOn ? 'visible' : 'hidden') +
-    '; touch-action:none; cursor:crosshair;';
-
   var content = h('div', { style:'position:relative; flex:1; min-height:0;' },
     S.view === 'matrix' ? matrixView() : listView(),
-    (activeTasks().length === 0 && S.filter.length === 0 && !S.penOn) ? emptyHint() : null,
-    canvas,
-    S.penOn ? penToolbar() : null
+    (activeTasks().length === 0 && S.filter.length === 0) ? emptyHint() : null
   );
 
   root.appendChild(topBar());
   if(S.saveError || S.loadError) root.appendChild(alertBar());
   root.appendChild(content);
 
-  if(S.penOn){
-    root.appendChild(h('div', { style:'position:absolute; top:74px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:8px; padding:6px 16px; background:oklch(0.55 0.11 250); color:oklch(0.99 0.01 250); border-radius:999px; font-size:12px; font-weight:700; z-index:41; box-shadow:0 6px 18px -6px oklch(0.55 0.11 250 / 0.6);' }, '✎ 手書きモード'));
-  }
   if(S.filterOpen) filterDrawer().forEach(function(n){ root.appendChild(n); });
   if(S.add)         root.appendChild(addModal());
   if(S.edit)        root.appendChild(editModal());
@@ -1237,17 +1100,8 @@ function render(){
   if(S.archiveOpen) root.appendChild(archiveScreen());
   if(S.toast)       root.appendChild(toastEl());
   if(S.updateReady) root.appendChild(updateBar());
-
-  // キャンバスはDOMに入った後でないと実寸が取れない
-  requestAnimationFrame(function(){
-    canvas._sizeToBox();
-    if(!inkRestored && S.ink){ inkRestored = true; canvas._restore(S.ink); }
-  });
 }
 
-window.addEventListener('resize', function(){
-  if(canvasEl) requestAnimationFrame(function(){ canvasEl._sizeToBox(); });
-});
 window.addEventListener('pointerup', function(){ if(swipe) swUp(); });
 
 /* ============================================================
