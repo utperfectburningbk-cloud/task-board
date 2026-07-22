@@ -30,6 +30,11 @@
   @keyframes modalIn{ from{ opacity:0; transform:translateY(10px) scale(.985);} to{ opacity:1; transform:translateY(0) scale(1);} }
   /* 縦向き・狭幅ではボタンのラベルを畳んでアイコンのみに */
   @media (max-width:900px){ .btn-label{ display:none; } }
+  /* 手書き中は下の文字が選択されないようにする。
+     長い線を引いたときに範囲選択が始まってしまうのを防ぐ */
+  body.pen-on, body.pen-on *{
+    -webkit-user-select:none; user-select:none; -webkit-touch-callout:none;
+  }
 </style>
 </head>
 <body>
@@ -41,7 +46,7 @@
 /* ============================================================
    定数
    ============================================================ */
-var APP_VERSION = '1.2.0';    // 更新時は sw.js の CACHE も同じ値に上げること
+var APP_VERSION = '1.2.1';    // 更新時は sw.js の CACHE も同じ値に上げること
 var STORE_KEY = 'lrt-task-board-v1';
 var CARD_CAP  = 4;            // 各象限の既定表示件数（超過分は折りたたむ）
 var ARCHIVE_DELAY = 4200;     // 完了 → 自動アーカイブまで(ms)
@@ -385,6 +390,12 @@ function toggleExpand(k){
 /* ============================================================
    手書きレイヤー（ボード全体に重なる独立キャンバス）
    ============================================================ */
+function clearSelection(){
+  try{
+    var s = window.getSelection();
+    if(s && !s.isCollapsed) s.removeAllRanges();
+  }catch(e){}
+}
 function ensureCanvas(){
   if(canvasEl) return canvasEl;
   var node = document.createElement('canvas');
@@ -414,13 +425,21 @@ function ensureCanvas(){
       y:(e.clientY - r.top)  * (node.height / r.height)
     };
   }
+  /* 既定の選択・ドラッグ動作を止める。
+     止めないと、長い線を引いたときに下の文字の範囲選択が始まってしまう */
+  node.addEventListener('selectstart', function(e){ e.preventDefault(); });
+  node.addEventListener('dragstart', function(e){ e.preventDefault(); });
+
   node.addEventListener('pointerdown', function(e){
     if(!S.penOn) return;
+    e.preventDefault();
+    clearSelection();
     drawing = true; last = pt(e);
     try{ node.setPointerCapture(e.pointerId); }catch(_){}
   });
   node.addEventListener('pointermove', function(e){
     if(!drawing) return;
+    e.preventDefault();
     var p = pt(e);
     ctx.globalCompositeOperation = S.pen.tool === 'erase' ? 'destination-out' : 'source-over';
     ctx.strokeStyle = S.pen.color;
@@ -1187,6 +1206,10 @@ var inkRestored = false;
 
 function render(){
   root.textContent = '';
+
+  // 手書き中だけ選択を殺す（常時 none にすると通常時のコピーができなくなる）
+  if(S.penOn){ document.body.classList.add('pen-on'); clearSelection(); }
+  else{ document.body.classList.remove('pen-on'); }
 
   var canvas = ensureCanvas();
   canvas.style.cssText = 'position:absolute; left:0; top:0; width:100%; height:100%; z-index:' +
