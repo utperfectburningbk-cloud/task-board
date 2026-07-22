@@ -11,9 +11,13 @@
 
 ---
 
+**公開URL: https://utperfectburningbk-cloud.github.io/task-board/**
+
+---
+
 ## メンバー向け：導入手順（iPad）
 
-1. Safari で配布された URL を開く
+1. Safari で上記の URL を開く
 2. 共有ボタン <kbd>􀈂</kbd> →「**ホーム画面に追加**」
 3. ホーム画面のアイコンから起動する
 4. 最初は空のボードです。「＋タスク」から案件とタスクを登録してください
@@ -51,30 +55,19 @@
 
 ## 管理者向け：GitHub Pages への展開
 
-このフォルダをそのままリポジトリのルートとして公開します。
+**設定済みです。** 以下は構成の記録と、作り直すときの手順です。
 
-### 初回
+| 項目 | 値 |
+|---|---|
+| リポジトリ | https://github.com/utperfectburningbk-cloud/task-board （Public） |
+| 公開URL | https://utperfectburningbk-cloud.github.io/task-board/ |
+| Pages ソース | ブランチ `main` / ルート `/` |
 
-```bash
-cd E:/LRT/task-board
-git init -b main
-git add -A
-git commit -m "タスク管理ボード 初版"
-
-# GitHub でリポジトリを作成してから
-git remote add origin https://github.com/<ユーザー名>/<リポジトリ名>.git
-git push -u origin main
-```
-
-GitHub のリポジトリ画面で **Settings → Pages → Build and deployment**
-→ Source: `Deploy from a branch` / Branch: `main` `/ (root)` → Save。
-
-1〜2分で `https://<ユーザー名>.github.io/<リポジトリ名>/` が公開されます。この URL をチームに配ってください。
-
-> **公開範囲に注意。** 無料プランの GitHub Pages は、リポジトリを Private にしても
-> 公開されたサイト自体は URL を知っていれば誰でも見られます。
-> ただしこのアプリはタスクを端末内にしか保存しないため、サイトを開かれても
-> 各メンバーのタスク内容が漏れることはありません。案件名などをソースに直接書かない限り問題ありません。
+> **Public リポジトリである点について。** 無料プランでは Private リポジトリから Pages を
+> 公開できないため Public にしています。ソースは誰でも読めますが、パスワードや顧客データは
+> 一切含まれません（タスクは各端末の localStorage のみ、サーバーには何も送信しない）。
+> 初期データも空なので、案件名が外部に出ることもありません。
+> **案件名や個人情報をソースに直接書かないでください。**
 
 ### 更新するとき
 
