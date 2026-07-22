@@ -41,7 +41,7 @@
 /* ============================================================
    定数
    ============================================================ */
-var APP_VERSION = '1.1.0';    // 更新時は sw.js の CACHE も同じ値に上げること
+var APP_VERSION = '1.2.0';    // 更新時は sw.js の CACHE も同じ値に上げること
 var STORE_KEY = 'lrt-task-board-v1';
 var CARD_CAP  = 4;            // 各象限の既定表示件数（超過分は折りたたむ）
 var ARCHIVE_DELAY = 4200;     // 完了 → 自動アーカイブまで(ms)
@@ -128,17 +128,37 @@ function spacer(){ return h('span', { style:'flex:1;' }); }
 function seed(){
   return { projects:[], tasks:[] };
 }
+/* 読み込みは「壊れていたら空で作り直す」ことを絶対にしない。
+   読めなかった中身は別キーへ退避し、画面にも警告を出す。
+   ここで黙って空を返すと、次の保存で元データを上書きしてしまうため。 */
 function load(){
-  try{
-    var raw = localStorage.getItem(STORE_KEY);
-    if(!raw) return seed();
-    var d = JSON.parse(raw);
-    if(!d || !Array.isArray(d.projects) || !Array.isArray(d.tasks)) return seed();
-    return {
-      projects:d.projects, tasks:d.tasks, ink:d.ink || null,
-      owner:d.owner || '', backedUpAt:d.backedUpAt || null
-    };
-  }catch(e){ return seed(); }
+  var raw = null;
+  try{ raw = localStorage.getItem(STORE_KEY); }
+  catch(e){ var s0 = seed(); s0.loadError = 'storage'; return s0; }
+
+  if(!raw) return seed();
+
+  var d = null;
+  try{ d = JSON.parse(raw); }catch(e){ /* 下で退避する */ }
+
+  if(!d || !Array.isArray(d.projects) || !Array.isArray(d.tasks)){
+    try{
+      // 同じ内容を既に退避済みなら増やさない（開き直すたびに溜まるのを防ぐ）
+      var dup = false, i;
+      for(i = 0; i < localStorage.length; i++){
+        var k = localStorage.key(i);
+        if(k && k.indexOf(STORE_KEY + '.recover.') === 0 && localStorage.getItem(k) === raw){ dup = true; break; }
+      }
+      if(!dup) localStorage.setItem(STORE_KEY + '.recover.' + Date.now(), raw);
+    }catch(e){}
+    var s1 = seed();
+    s1.loadError = 'broken';
+    return s1;
+  }
+  return {
+    projects:d.projects, tasks:d.tasks, ink:d.ink || null,
+    owner:d.owner || '', backedUpAt:d.backedUpAt || null
+  };
 }
 function snapshot(){
   return {
@@ -147,10 +167,16 @@ function snapshot(){
     backedUpAt:S.backedUpAt || null
   };
 }
+/* 保存に失敗したことを黙って握りつぶさない。
+   握りつぶすと「入力したのに保存されていない」状態に気づけないため、
+   画面上部に警告を出し続けて、書き出しでの退避を促す。 */
 function save(){
   try{
     localStorage.setItem(STORE_KEY, JSON.stringify(snapshot()));
-  }catch(e){ /* 容量超過等は無視（表示は継続する） */ }
+    S.saveError = null;
+  }catch(e){
+    S.saveError = (e && e.name === 'QuotaExceededError') ? 'quota' : 'failed';
+  }
 }
 
 /* ============================================================
@@ -169,6 +195,8 @@ var S = {
   filterOpen:false, archiveOpen:false, settingsOpen:false,
   add:null, edit:null, newProjName:'',
   updateReady:false,
+  loadError:boot.loadError || null,   // 保存データを読めなかった
+  saveError:null,                     // 保存できていない
   toast:null
 };
 var timers = {};      // 完了 → アーカイブ の予約
@@ -1055,6 +1083,35 @@ function settingsModal(){
   );
 }
 
+/* データが読めなかった／保存できていないときの警告。
+   どちらも放置すると気づかないうちにタスクを失うため、消せない帯として出す。 */
+function alertBar(){
+  var msg, detail;
+  if(S.saveError === 'quota'){
+    msg = '保存できていません（容量がいっぱいです）';
+    detail = '手書きの書き込みを「全消去」するか、⚙から書き出して整理してください。';
+  }else if(S.saveError){
+    msg = '保存できていません';
+    detail = 'プライベートブラウズ中の可能性があります。通常のタブで開き直してください。';
+  }else if(S.loadError === 'broken'){
+    msg = '保存されていたデータを読み込めませんでした';
+    detail = '中身は消さずに退避してあります。復旧が必要な場合はお知らせください。';
+  }else{
+    msg = 'この端末ではデータを保存できません';
+    detail = 'プライベートブラウズを解除するか、通常のタブで開き直してください。';
+  }
+  return h('div', { style:'flex:0 0 auto; display:flex; align-items:center; gap:12px; padding:10px 18px; background:oklch(0.955 0.05 30); border-bottom:1px solid oklch(0.64 0.17 30); z-index:22;' },
+    h('span', { style:'font-size:15px;' }, '⚠'),
+    h('span', { style:'font-size:13px; font-weight:700; color:oklch(0.42 0.14 30);', text:msg }),
+    h('span', { style:'font-size:12px; color:oklch(0.48 0.08 30);', text:detail }),
+    spacer(),
+    h('button', {
+      style:'height:32px; padding:0 14px; border:1px solid oklch(0.64 0.17 30); background:transparent; border-radius:9px; font-size:12px; font-weight:700; color:oklch(0.45 0.15 30); cursor:pointer;',
+      onclick:function(){ setState({ settingsOpen:true }, { persist:false }); }
+    }, '書き出して退避')
+  );
+}
+
 /* 空のボード向けの案内。初回起動時と、タスクを片付けきったときに出る */
 function emptyHint(){
   var first = S.projects.length === 0;
@@ -1144,6 +1201,7 @@ function render(){
   );
 
   root.appendChild(topBar());
+  if(S.saveError || S.loadError) root.appendChild(alertBar());
   root.appendChild(content);
 
   if(S.penOn){
