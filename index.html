@@ -41,7 +41,7 @@
 /* ============================================================
    定数
    ============================================================ */
-var APP_VERSION = '1.3.0';    // 更新時は sw.js の CACHE も同じ値に上げること
+var APP_VERSION = '1.4.0';    // 更新時は sw.js の CACHE も同じ値に上げること
 var STORE_KEY = 'lrt-task-board-v1';
 var CARD_CAP  = 4;            // 各象限の既定表示件数（超過分は折りたたむ）
 var ARCHIVE_DELAY = 4200;     // 完了 → 自動アーカイブまで(ms)
@@ -69,10 +69,13 @@ function todayLabel(){
   var d = today(), w = ['日','月','火','水','木','金','土'][d.getDay()];
   return d.getFullYear() + '年 ' + (d.getMonth()+1) + '月' + d.getDate() + '日（' + w + '）';
 }
-function fmtDue(due){ var x = new Date(due+'T00:00:00'); return '〆 ' + (x.getMonth()+1) + '/' + x.getDate(); }
+function fmtDue(due){ if(!due) return '期日未定'; var x = new Date(due+'T00:00:00'); return '〆 ' + (x.getMonth()+1) + '/' + x.getDate(); }
+/* 並び替え用。期日なしは末尾に送る */
+function dueSortKey(t){ return t.due ? daysTo(t.due) : Infinity; }
 
-/* 期限接近ルール: 超過 / 当日 / 3日以内 / それ以外 */
+/* 期限接近ルール: 未定 / 超過 / 当日 / 3日以内 / それ以外 */
 function dstate(due){
+  if(!due) return { k:'none', n:null };
   var n = daysTo(due);
   if(n < 0)  return { k:'over',  n:n };
   if(n === 0)return { k:'today', n:n };
@@ -193,7 +196,7 @@ var S = {
   owner:boot.owner || '',
   backedUpAt:boot.backedUpAt || null,
   filter:[], sort:'due', expanded:{},
-  filterOpen:false, archiveOpen:false, settingsOpen:false,
+  filterOpen:false, archiveOpen:false, settingsOpen:false, triageOpen:false,
   add:null, edit:null, newProjName:'',
   updateReady:false,
   loadError:boot.loadError || null,   // 保存データを読めなかった
@@ -231,8 +234,10 @@ function activeTasks(){
     return !t.arch && (S.filter.length === 0 || S.filter.indexOf(t.pj) >= 0);
   });
 }
-function priRank(t){ return (t.u && t.i) ? 0 : t.i ? 1 : t.u ? 2 : 3; }
-function priTag(t){ if(t.u && t.i) return '重要・緊急'; if(t.i) return '重要'; if(t.u) return '緊急'; return '—'; }
+function isUnclassified(t){ return t.u == null; }   // 緊急度・重要度が未設定
+function priRank(t){ if(t.u == null) return 4; return (t.u && t.i) ? 0 : t.i ? 1 : t.u ? 2 : 3; }
+function priTag(t){ if(t.u == null) return '未分類'; if(t.u && t.i) return '重要・緊急'; if(t.i) return '重要'; if(t.u) return '緊急'; return '—'; }
+function unclassifiedTasks(){ return activeTasks().filter(isUnclassified); }
 
 /* ============================================================
    操作
@@ -315,9 +320,11 @@ function swUp(){
   }
 }
 
-/* ---- 追加フロー ---- */
+/* ---- 追加フロー ----
+   緊急度・重要度と期日は省略できる。省略したタスクは「未分類」に入り、
+   あとで振り分けドロワーやリスト画面から設定する。 */
 function openAdd(){
-  setState({ add:{ step:1, pj:null, title:'', u:null, i:null, due:iso(today()) }, newProjName:'' }, { persist:false });
+  setState({ add:{ step:1, pj:null, title:'', u:null, i:null, due:'' }, newProjName:'' }, { persist:false });
 }
 function closeAdd(){ setState({ add:null }, { persist:false }); }
 function addBack(){
@@ -325,22 +332,24 @@ function addBack(){
   if(a.step === 1){ closeAdd(); return; }
   a.step -= 1; setState({}, { persist:false });
 }
-function addNext(){
-  var a = S.add; if(!a) return;
-  if(a.step < 3){
-    if(a.step === 1 && !a.pj) return;
-    if(a.step === 2 && !a.title.trim()) return;
-    a.step += 1; setState({}, { persist:false });
-    return;
-  }
-  if(a.u === null) return;
+/* 実際にタスクを登録する。u が null のままなら未分類として入る */
+function commitAdd(){
+  var a = S.add; if(!a || !a.title.trim()) return;
   var id = 'n' + Date.now();
-  var t = { id:id, pj:a.pj, t:a.title.trim(), u:a.u, i:a.i, due:a.due, done:false, arch:false };
-  setState({ tasks:[t].concat(S.tasks), add:null, view:'matrix' });
-  showToast('タスクを追加しました', function(){
+  var t = { id:id, pj:a.pj, t:a.title.trim(), u:a.u, i:a.i, due:a.due || '', done:false, arch:false };
+  setState({ tasks:[t].concat(S.tasks), add:null });
+  showToast(t.u == null ? '未分類に追加しました' : 'タスクを追加しました', function(){
     setState({ tasks:S.tasks.filter(function(x){ return x.id !== id; }) });
   });
 }
+function addNext(){
+  var a = S.add; if(!a) return;
+  if(a.step === 1){ if(!a.pj) return; a.step = 2; setState({}, { persist:false }); return; }
+  if(a.step === 2){ if(!a.title.trim()) return; a.step = 3; setState({}, { persist:false }); return; }
+  commitAdd();                 // step 3: 緊急度・重要度・期日は任意
+}
+/* タスク名を入れた段階で、振り分けを後回しにして登録する */
+function addQuick(){ commitAdd(); }
 function addNewProj(){
   var n = S.newProjName.trim(); if(!n) return;
   var id = 'p' + Date.now();
@@ -367,6 +376,19 @@ function deleteFromEdit(){
   var e = S.edit; if(!e) return;
   setState({ edit:null }, { persist:false });
   deleteTask(e.id);
+}
+
+/* ---- 振り分け（未分類 → 象限へ） ---- */
+function openTriage(){ setState({ triageOpen:true }, { persist:false }); }
+function closeTriage(){ setState({ triageOpen:false }, { persist:false }); }
+function triageSetQuad(id, u, i){
+  var t = task(id); if(t){ t.u = u; t.i = i; }
+  // 未分類が尽きたら自動で閉じる
+  setState({ triageOpen: unclassifiedTasks().length > 0 });
+}
+function triageSetDue(id, due){
+  var t = task(id); if(t){ t.due = due; }
+  setState({});
 }
 
 /* ---- 表示切替 ---- */
@@ -468,7 +490,7 @@ function cardVisuals(t){
   var done = !!t.done;
   return {
     p:p, ds:ds, dc:dc, pc:pc, done:done,
-    badgeShow: !done && ds.k !== 'norm',
+    badgeShow: !done && ds.k !== 'norm' && ds.k !== 'none',
     badge: badgeText(ds),
     badgeStyle:'font-size:10px; font-weight:700; padding:2px 7px; border-radius:6px; background:' + dc.bd +
       '; color:' + (dc.txt ? 'oklch(0.99 0.01 60)' : 'oklch(0.35 0.05 78)') + ';',
@@ -533,7 +555,10 @@ function taskCard(t){
 /* リスト用の行 */
 function taskRow(t){
   var v = cardVisuals(t);
+  var unc = isUnclassified(t);
   var on = (t.u || t.i) && !v.done;
+  var tagBg = unc ? 'oklch(0.96 0.03 80)' : (on ? 'oklch(0.94 0.008 260)' : 'transparent');
+  var tagCol = unc ? 'oklch(0.5 0.09 70)' : 'oklch(0.5 0.01 260)';
   var row = h('div', {
     style:'position:relative; display:flex; align-items:center; height:56px; background:' + v.boxBg +
       '; border:1px solid ' + v.boxBd + '; border-radius:11px; overflow:hidden; touch-action:pan-y; cursor:pointer;' +
@@ -553,7 +578,7 @@ function taskRow(t){
     h('div', { style:'display:flex; align-items:center; gap:6px; width:120px; justify-content:flex-end;' },
       h('span', {
         style:'font-size:11px; font-weight:700; padding:3px 9px; border-radius:7px; white-space:nowrap; background:' +
-          (on ? 'oklch(0.94 0.008 260)' : 'transparent') + '; color:oklch(0.5 0.01 260);',
+          tagBg + '; color:' + tagCol + ';',
         text:priTag(t)
       })
     ),
@@ -608,7 +633,7 @@ function matrixView(){
   var active = activeTasks();
   var quads = QUAD_DEFS.map(function(d){
     var list = active.filter(function(t){ return t.u === d.u && t.i === d.i; })
-                     .sort(function(a,b){ return daysTo(a.due) - daysTo(b.due); });
+                     .sort(function(a,b){ return dueSortKey(a) - dueSortKey(b); });
     var exp = !!S.expanded[d.k];
     var vis = exp ? list : list.slice(0, CARD_CAP);
     var hidden = list.length - vis.length;
@@ -650,9 +675,9 @@ function matrixView(){
 
 function listView(){
   var rows = activeTasks().slice();
-  if(S.sort === 'due')       rows.sort(function(a,b){ return daysTo(a.due) - daysTo(b.due); });
-  else if(S.sort === 'proj') rows.sort(function(a,b){ return a.pj.localeCompare(b.pj) || daysTo(a.due) - daysTo(b.due); });
-  else                       rows.sort(function(a,b){ return priRank(a) - priRank(b) || daysTo(a.due) - daysTo(b.due); });
+  if(S.sort === 'due')       rows.sort(function(a,b){ return dueSortKey(a) - dueSortKey(b); });
+  else if(S.sort === 'proj') rows.sort(function(a,b){ return a.pj.localeCompare(b.pj) || dueSortKey(a) - dueSortKey(b); });
+  else                       rows.sort(function(a,b){ return priRank(a) - priRank(b) || dueSortKey(a) - dueSortKey(b); });
 
   function sortBtn(key, label){
     return h('button', {
@@ -707,10 +732,72 @@ function filterDrawer(){
   ];
 }
 
+/* 未分類タスクがあるときだけトップバー直下に出る帯。振り分けを促す */
+function inboxBanner(){
+  var n = unclassifiedTasks().length;
+  return h('div', { style:'flex:0 0 auto; display:flex; align-items:center; gap:12px; padding:9px 18px; background:oklch(0.97 0.02 250); border-bottom:1px solid oklch(0.86 0.05 250); z-index:19;' },
+    h('span', { style:'font-size:15px;' }, '📥'),
+    h('span', { style:'font-size:13px; font-weight:700; color:oklch(0.42 0.09 250);', text:'未分類のタスクが ' + n + '件あります' }),
+    h('span', { style:'font-size:12px; color:oklch(0.52 0.05 250);' }, '緊急度・重要度や期日をあとから設定できます'),
+    spacer(),
+    h('button', {
+      style:'height:34px; padding:0 16px; border:none; background:oklch(0.5 0.11 250); color:#fff; border-radius:9px; font-size:13px; font-weight:700; cursor:pointer;',
+      onclick:openTriage
+    }, '振り分ける')
+  );
+}
+
+function triageDrawer(){
+  var list = unclassifiedTasks();
+  function row(t){
+    var p = proj(t.pj), pc = projColor(p.hue);
+    function qb(label, u, i){
+      return h('button', {
+        style:'padding:9px 4px; border:1px solid oklch(0.88 0.005 95); background:oklch(0.99 0.003 90); border-radius:9px; font-size:12px; font-weight:700; color:oklch(0.38 0.012 260); cursor:pointer;',
+        onclick:function(){ triageSetQuad(t.id, u, i); }
+      }, label);
+    }
+    return h('div', { style:'flex:0 0 auto; border:1px solid oklch(0.91 0.005 95); border-radius:12px; padding:12px; display:flex; flex-direction:column; gap:10px; background:oklch(0.99 0.003 90);' },
+      h('div', { style:'display:flex; align-items:center; gap:7px;' },
+        h('span', { style:'width:8px; height:8px; border-radius:2px; background:' + pc + '; flex:0 0 auto;' }),
+        h('span', { style:'font-size:11px; font-weight:700; color:' + pc + '; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;', text:p.name })
+      ),
+      h('span', { style:'font-size:14px; line-height:1.35; color:oklch(0.28 0.012 260);', text:t.t }),
+      h('div', { style:'display:grid; grid-template-columns:1fr 1fr; gap:6px;' },
+        qb('すぐやる', 1, 1), qb('計画して進める', 0, 1), qb('さばく・任せる', 1, 0), qb('後回し', 0, 0)
+      ),
+      h('div', { style:'display:flex; align-items:center; gap:8px;' },
+        h('span', { style:'font-size:11px; color:oklch(0.55 0.01 260);' }, '期日'),
+        h('input', {
+          type:'date', value:t.due || '',
+          style:'flex:1; height:38px; padding:0 12px; border:1px solid oklch(0.86 0.006 95); border-radius:10px; font-size:14px; color:oklch(0.3 0.012 260); outline:none; background:transparent;',
+          oninput:function(e){ triageSetDue(t.id, e.target.value); }
+        })
+      )
+    );
+  }
+  return [
+    h('div', { style:'position:absolute; inset:0; background:oklch(0.2 0.01 260 / 0.28); z-index:52;', onclick:closeTriage }),
+    h('div', { style:'position:absolute; top:0; right:0; bottom:0; width:400px; max-width:90%; background:oklch(0.985 0.005 90); z-index:53; box-shadow:-20px 0 50px -24px oklch(0.2 0.02 260 / 0.5); display:flex; flex-direction:column; padding:22px;' },
+      h('div', { style:'display:flex; align-items:center;' },
+        h('span', { style:'font-size:16px; font-weight:700; color:oklch(0.32 0.012 260);' }, '未分類を振り分け'),
+        spacer(),
+        h('button', { style:'border:none; background:transparent; font-size:20px; color:oklch(0.55 0.01 260); cursor:pointer;', onclick:closeTriage }, '✕')
+      ),
+      h('span', { style:'font-size:12px; color:oklch(0.6 0.01 260); margin:6px 0 16px;' }, '象限を選ぶとマトリクスへ移動します。期日は任意です。'),
+      h('div', { style:'flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:10px;' },
+        list.map(row),
+        list.length === 0 ? h('span', { style:'font-size:13px; color:oklch(0.7 0.008 260); padding:8px 2px;' }, '未分類のタスクはありません。') : null
+      )
+    )
+  ];
+}
+
 function addModal(){
   var a = S.add;
   var dp = a.pj ? proj(a.pj) : null;
-  var nextEnabled = (a.step === 1 && a.pj) || (a.step === 2 && a.title.trim()) || (a.step === 3 && a.u !== null);
+  // step3 の緊急度・重要度は任意にしたので、常に登録できる
+  var nextEnabled = (a.step === 1 && a.pj) || (a.step === 2 && a.title.trim()) || (a.step === 3);
 
   function stepDot(n){
     return h('span', { style:'width:7px; height:7px; border-radius:50%; background:' +
@@ -774,6 +861,7 @@ function addModal(){
     var chip = dueChip(a.due);
     body = h('div', {},
       h('span', { style:'font-size:13px; font-weight:700; color:oklch(0.5 0.01 260);' }, '③ 緊急度・重要度と期限日'),
+      h('span', { style:'display:block; font-size:11px; color:oklch(0.62 0.01 260); margin-top:4px;' }, 'どちらも任意です。未選択のまま追加すると「未分類」に入り、あとから振り分けられます。'),
       h('div', { style:'display:flex; align-items:center; gap:8px; margin:12px 0 4px; padding:10px 12px; background:oklch(0.965 0.004 90); border-radius:10px;' },
         h('span', { style:'width:10px; height:10px; border-radius:3px; background:' + projColor(dp.hue) + ';' }),
         h('span', { style:'font-size:12px; color:oklch(0.55 0.01 260);', text:dp.name }),
@@ -812,6 +900,10 @@ function addModal(){
       h('div', { style:'display:flex; align-items:center; gap:10px; padding:14px 22px 20px;' },
         h('button', { style:'height:44px; padding:0 22px; ' + ghostBtn, onclick:addBack }, '戻る'),
         spacer(),
+        (a.step === 2) ? h('button', {
+          style:'height:44px; padding:0 18px; border:1px solid oklch(0.8 0.03 250); background:transparent; border-radius:12px; font-size:14px; font-weight:700; color:oklch(0.45 0.08 250); cursor:pointer;',
+          onclick:addQuick
+        }, 'あとで振り分け') : null,
         h('button', {
           style:'height:44px; padding:0 26px; border:none; border-radius:12px; font-size:15px; font-weight:700; cursor:' +
             (nextEnabled ? 'pointer' : 'not-allowed') + '; background:' +
@@ -1091,9 +1183,11 @@ function render(){
 
   root.appendChild(topBar());
   if(S.saveError || S.loadError) root.appendChild(alertBar());
+  if(unclassifiedTasks().length > 0) root.appendChild(inboxBanner());
   root.appendChild(content);
 
-  if(S.filterOpen) filterDrawer().forEach(function(n){ root.appendChild(n); });
+  if(S.filterOpen)  filterDrawer().forEach(function(n){ root.appendChild(n); });
+  if(S.triageOpen)  triageDrawer().forEach(function(n){ root.appendChild(n); });
   if(S.add)         root.appendChild(addModal());
   if(S.edit)        root.appendChild(editModal());
   if(S.settingsOpen)root.appendChild(settingsModal());
