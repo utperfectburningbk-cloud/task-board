@@ -41,7 +41,7 @@
 /* ============================================================
    定数
    ============================================================ */
-var APP_VERSION = '1.4.2';    // 更新時は sw.js の CACHE も同じ値に上げること
+var APP_VERSION = '1.5.0';    // 更新時は sw.js の CACHE も同じ値に上げること
 var STORE_KEY = 'lrt-task-board-v1';
 var CARD_CAP  = 4;            // 各象限の既定表示件数（超過分は折りたたむ）
 var ARCHIVE_DELAY = 4200;     // 完了 → 自動アーカイブまで(ms)
@@ -838,23 +838,45 @@ function addModal(){
 
   var body;
   if(a.step === 1){
+    // 案件が多いときは絞り込み欄を出す。入力中に再描画するとフォーカスが飛ぶので、
+    // 該当する行の表示/非表示だけを直接切り替える
+    var projRows = [], noHitEl = null;
+    var showSearch = S.projects.length >= 8;
+    var rows = S.projects.map(function(p){
+      var sel = a.pj === p.id, pc = projColor(p.hue);
+      var el = h('button', {
+        style:'display:flex; align-items:center; gap:12px; padding:13px 15px; border:1.5px solid ' +
+          (sel ? pc : 'oklch(0.9 0.005 95)') + '; background:' + (sel ? 'oklch(0.98 0.012 260)' : 'oklch(0.99 0.003 90)') +
+          '; border-radius:12px; cursor:pointer; flex:0 0 auto;',
+        onclick:function(){ a.pj = p.id; setState({}, { persist:false }); }
+      },
+        h('span', { style:'width:12px; height:12px; border-radius:3px; background:' + pc + '; flex:0 0 auto;' }),
+        h('span', { style:'flex:1; text-align:left; font-size:15px; color:oklch(0.32 0.012 260);', text:p.name }),
+        h('span', { style:'font-size:15px; font-weight:700; color:' + (sel ? pc : 'transparent') + ';' }, '✓')
+      );
+      projRows.push({ name:p.name.toLowerCase(), el:el });
+      return el;
+    });
+    noHitEl = h('span', { style:'display:none; font-size:12px; color:oklch(0.65 0.01 260); padding:4px 2px;' },
+      '該当する案件がありません。下の欄から新規追加できます。');
+    function applyProjFilter(q){
+      q = (q || '').trim().toLowerCase();
+      var hit = 0;
+      projRows.forEach(function(r){
+        var on = !q || r.name.indexOf(q) >= 0;
+        r.el.style.display = on ? 'flex' : 'none';
+        if(on) hit++;
+      });
+      noHitEl.style.display = hit ? 'none' : '';
+    }
     body = h('div', {},
       h('span', { style:'font-size:13px; font-weight:700; color:oklch(0.5 0.01 260);' }, '① 案件を選ぶ'),
-      h('div', { style:'display:flex; flex-direction:column; gap:8px; margin-top:12px;' },
-        S.projects.map(function(p){
-          var sel = a.pj === p.id, pc = projColor(p.hue);
-          return h('button', {
-            style:'display:flex; align-items:center; gap:12px; padding:13px 15px; border:1.5px solid ' +
-              (sel ? pc : 'oklch(0.9 0.005 95)') + '; background:' + (sel ? 'oklch(0.98 0.012 260)' : 'oklch(0.99 0.003 90)') +
-              '; border-radius:12px; cursor:pointer;',
-            onclick:function(){ a.pj = p.id; setState({}, { persist:false }); }
-          },
-            h('span', { style:'width:12px; height:12px; border-radius:3px; background:' + pc + '; flex:0 0 auto;' }),
-            h('span', { style:'flex:1; text-align:left; font-size:15px; color:oklch(0.32 0.012 260);', text:p.name }),
-            h('span', { style:'font-size:15px; font-weight:700; color:' + (sel ? pc : 'transparent') + ';' }, '✓')
-          );
-        })
-      ),
+      showSearch ? h('input', {
+        placeholder:'🔍 案件名で絞り込み',
+        style:'width:100%; height:40px; margin-top:10px; padding:0 14px; border:1px solid oklch(0.88 0.005 95); border-radius:10px; font-size:14px; background:oklch(0.985 0.004 90); color:oklch(0.32 0.012 260); outline:none;',
+        oninput:function(ev){ applyProjFilter(ev.target.value); }
+      }) : null,
+      h('div', { style:'display:flex; flex-direction:column; gap:8px; margin-top:12px;' }, rows, noHitEl),
       h('div', { style:'display:flex; gap:8px; margin-top:12px;' },
         h('input', {
           value:S.newProjName, placeholder:'＋ 新規案件を追加',
@@ -911,19 +933,23 @@ function addModal(){
     );
   }
 
-  return h('div', { style:'position:absolute; inset:0; background:oklch(0.2 0.01 260 / 0.34); z-index:60; display:flex; align-items:center; justify-content:center;', onclick:closeAdd },
+  // 案件が増えて内容が画面より高くなっても、ヘッダーとフッター（次へ）は
+  // 常に見える位置に固定し、中身だけをスクロールさせる
+  return h('div', { style:'position:absolute; inset:0; padding:20px; background:oklch(0.2 0.01 260 / 0.34); z-index:60; display:flex; align-items:center; justify-content:center;', onclick:closeAdd },
     h('div', {
-      style:'width:520px; max-width:92%; background:oklch(0.99 0.004 90); border-radius:20px; overflow:hidden; box-shadow:0 40px 90px -30px oklch(0.2 0.02 260 / 0.6); display:flex; flex-direction:column; animation:modalIn .2s ease;',
+      style:'width:520px; max-width:92%; max-height:100%; background:oklch(0.99 0.004 90); border-radius:20px; overflow:hidden; box-shadow:0 40px 90px -30px oklch(0.2 0.02 260 / 0.6); display:flex; flex-direction:column; animation:modalIn .2s ease;',
       onclick:function(e){ e.stopPropagation(); }
     },
-      h('div', { style:'display:flex; align-items:center; gap:12px; padding:18px 22px 14px;' },
+      h('div', { style:'flex:0 0 auto; display:flex; align-items:center; gap:12px; padding:18px 22px 14px;' },
         h('span', { style:'font-size:17px; font-weight:700; color:oklch(0.32 0.012 260);' }, 'タスクを追加'),
         spacer(),
         h('div', { style:'display:flex; gap:6px; align-items:center;' }, stepDot(1), stepDot(2), stepDot(3)),
         h('button', { style:'border:none; background:transparent; font-size:20px; color:oklch(0.55 0.01 260); cursor:pointer; margin-left:6px;', onclick:closeAdd }, '✕')
       ),
-      h('div', { style:'padding:4px 22px 6px; min-height:250px;' }, body),
-      h('div', { style:'display:flex; align-items:center; gap:10px; padding:14px 22px 20px;' },
+      h('div', { style:'flex:1 1 auto; min-height:0; overflow-y:auto; padding:4px 22px 6px;' },
+        h('div', { style:'min-height:250px;' }, body)
+      ),
+      h('div', { style:'flex:0 0 auto; display:flex; align-items:center; gap:10px; padding:14px 22px 20px; border-top:1px solid oklch(0.94 0.004 95); background:oklch(0.99 0.004 90);' },
         h('button', { style:'height:44px; padding:0 22px; ' + ghostBtn, onclick:addBack }, '戻る'),
         spacer(),
         (a.step === 2) ? h('button', {
@@ -950,17 +976,17 @@ function editModal(){
       h('span', { style:'font-size:11px; opacity:.8;' }, sub)
     );
   }
-  return h('div', { style:'position:absolute; inset:0; background:oklch(0.2 0.01 260 / 0.34); z-index:62; display:flex; align-items:center; justify-content:center;', onclick:closeEdit },
+  return h('div', { style:'position:absolute; inset:0; padding:20px; background:oklch(0.2 0.01 260 / 0.34); z-index:62; display:flex; align-items:center; justify-content:center;', onclick:closeEdit },
     h('div', {
-      style:'width:520px; max-width:92%; max-height:92%; overflow-y:auto; background:oklch(0.99 0.004 90); border-radius:20px; box-shadow:0 40px 90px -30px oklch(0.2 0.02 260 / 0.6); display:flex; flex-direction:column; animation:modalIn .2s ease;',
+      style:'width:520px; max-width:92%; max-height:100%; overflow:hidden; background:oklch(0.99 0.004 90); border-radius:20px; box-shadow:0 40px 90px -30px oklch(0.2 0.02 260 / 0.6); display:flex; flex-direction:column; animation:modalIn .2s ease;',
       onclick:function(ev){ ev.stopPropagation(); }
     },
-      h('div', { style:'display:flex; align-items:center; gap:12px; padding:18px 22px 6px;' },
+      h('div', { style:'flex:0 0 auto; display:flex; align-items:center; gap:12px; padding:18px 22px 6px;' },
         h('span', { style:'font-size:17px; font-weight:700; color:oklch(0.32 0.012 260);' }, 'タスクを編集'),
         spacer(),
         h('button', { style:'border:none; background:transparent; font-size:20px; color:oklch(0.55 0.01 260); cursor:pointer;', onclick:closeEdit }, '✕')
       ),
-      h('div', { style:'padding:8px 22px 4px; display:flex; flex-direction:column; gap:16px;' },
+      h('div', { style:'flex:1 1 auto; min-height:0; overflow-y:auto; padding:8px 22px 4px; display:flex; flex-direction:column; gap:16px;' },
         h('div', {},
           h('span', { style:'font-size:12px; font-weight:700; color:oklch(0.5 0.01 260);' }, '案件'),
           h('div', { style:'display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;' },
@@ -1005,7 +1031,7 @@ function editModal(){
           h('span', { style:chip.style, text:chip.text })
         )
       ),
-      h('div', { style:'display:flex; align-items:center; gap:10px; padding:16px 22px 20px;' },
+      h('div', { style:'flex:0 0 auto; display:flex; align-items:center; gap:10px; padding:16px 22px 20px; border-top:1px solid oklch(0.94 0.004 95); background:oklch(0.99 0.004 90);' },
         h('button', { style:'height:44px; padding:0 18px; border:1px solid oklch(0.78 0.09 30); background:transparent; border-radius:12px; font-size:14px; color:oklch(0.55 0.14 30); cursor:pointer;', onclick:deleteFromEdit }, '削除'),
         spacer(),
         h('button', { style:ghostBtn, onclick:closeEdit }, 'キャンセル'),
