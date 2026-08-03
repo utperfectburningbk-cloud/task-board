@@ -41,7 +41,7 @@
 /* ============================================================
    定数
    ============================================================ */
-var APP_VERSION = '1.5.0';    // 更新時は sw.js の CACHE も同じ値に上げること
+var APP_VERSION = '1.6.0';    // 更新時は sw.js の CACHE も同じ値に上げること
 var STORE_KEY = 'lrt-task-board-v1';
 var CARD_CAP  = 4;            // 各象限の既定表示件数（超過分は折りたたむ）
 var ARCHIVE_DELAY = 4200;     // 完了 → 自動アーカイブまで(ms)
@@ -53,7 +53,9 @@ var QUAD_DEFS = [
   { k:'q3', u:1, i:0, title:'さばく・任せる', sub:'',     hue:196 },
   { k:'q4', u:0, i:0, title:'後回し・見送り', sub:'',     hue:260 }
 ];
-var NEW_PROJ_HUES = [20, 86, 340, 110, 270];
+var PROJ_GROUP_MIN = 8;       // これ以上の案件数で「絞り込み」と「最近使った案件」を出す
+var RECENT_PROJ_MAX = 3;      // 「最近使った案件」に並べる件数
+var PALETTE_HUES = [0,30,60,90,120,150,180,210,240,270,300,330];
 
 /* ============================================================
    日付ユーティリティ
@@ -197,6 +199,7 @@ var S = {
   backedUpAt:boot.backedUpAt || null,
   filter:[], sort:'due', expanded:{},
   filterOpen:false, archiveOpen:false, settingsOpen:false, triageOpen:false,
+  projectsOpen:false, paletteFor:null,
   add:null, edit:null, newProjName:'',
   updateReady:false,
   loadError:boot.loadError || null,   // 保存データを読めなかった
@@ -225,6 +228,49 @@ function proj(id){
   return { name:'—', hue:260 };
 }
 function projColor(hue){ return 'oklch(0.56 0.11 ' + hue + ')'; }
+
+/* ID は時刻だけだと同じミリ秒内の連続作成で衝突し、
+   別々のはずの案件・タスクが同一視されて片方が巻き添えで消える。
+   通し番号を足して必ず一意にする。 */
+var uidSeq = 0;
+function uid(prefix){ uidSeq += 1; return prefix + Date.now().toString(36) + '-' + uidSeq.toString(36); }
+
+/* 既存の案件色から最も離れた色相を選ぶ。
+   固定パレットの使い回しだと件数が増えたとき色が重複し、
+   案件の見分けがつかなくなるため、都度いちばん空いている色相を割り当てる。 */
+function hueGap(h, used){
+  var min = 360, i, d;
+  for(i = 0; i < used.length; i++){
+    d = Math.abs(h - used[i]) % 360;
+    if(d > 180) d = 360 - d;
+    if(d < min) min = d;
+  }
+  return min;
+}
+function nextHue(){
+  var used = S.projects.map(function(p){ return p.hue; });
+  if(used.length === 0) return 250;
+  var best = 0, bestGap = -1, h;
+  for(h = 0; h < 360; h += 5){
+    var g = hueGap(h, used);
+    if(g > bestGap){ bestGap = g; best = h; }
+  }
+  return best;
+}
+
+/* 案件の絞り込み。アーカイブ済みは新規タスクの候補から外すが、
+   実体は消さない（過去タスクが名前と色を参照しているため） */
+function pickerProjects(){ return S.projects.filter(function(p){ return !p.arch; }); }
+function projTaskCount(id){
+  var a = 0, d = 0;
+  S.tasks.forEach(function(t){ if(t.pj === id){ if(t.arch) d++; else a++; } });
+  return { active:a, done:d, total:a + d };
+}
+function touchProj(id){
+  var p = proj(id);
+  if(p && p.id) p.usedAt = Date.now();
+}
+
 function task(id){
   for(var i=0;i<S.tasks.length;i++) if(S.tasks[i].id === id) return S.tasks[i];
   return null;
@@ -335,8 +381,9 @@ function addBack(){
 /* 実際にタスクを登録する。u が null のままなら未分類として入る */
 function commitAdd(){
   var a = S.add; if(!a || !a.title.trim()) return;
-  var id = 'n' + Date.now();
+  var id = uid('n');
   var t = { id:id, pj:a.pj, t:a.title.trim(), u:a.u, i:a.i, due:a.due || '', done:false, arch:false };
+  touchProj(a.pj);               // 次回の追加で「最近使った案件」の上位に出す
   setState({ tasks:[t].concat(S.tasks), add:null });
   showToast(t.u == null ? '未分類に追加しました' : 'タスクを追加しました', function(){
     setState({ tasks:S.tasks.filter(function(x){ return x.id !== id; }) });
@@ -358,11 +405,43 @@ function addQuick(){
 }
 function addNewProj(){
   var n = S.newProjName.trim(); if(!n) return;
-  var id = 'p' + Date.now();
-  var hue = NEW_PROJ_HUES[S.projects.length % NEW_PROJ_HUES.length];
-  S.projects = S.projects.concat([{ id:id, name:n, hue:hue }]);
+  var id = uid('p');
+  S.projects = S.projects.concat([{ id:id, name:n, hue:nextHue(), usedAt:Date.now() }]);
   if(S.add) S.add.pj = id;
   setState({ newProjName:'' });
+}
+
+/* ---- 案件の整理 ---- */
+function openProjects(){ setState({ projectsOpen:true, paletteFor:null }, { persist:false }); }
+function closeProjects(){ setState({ projectsOpen:false, paletteFor:null }, { persist:false }); }
+function renameProj(id, name){
+  var p = proj(id);
+  if(p && p.id){ p.name = name; save(); }   // 入力中は再描画しない（フォーカスが飛ぶため）
+}
+function setProjHue(id, hue){
+  var p = proj(id);
+  if(p && p.id) p.hue = hue;
+  setState({ paletteFor:null });
+}
+function toggleProjArchive(id){
+  var p = proj(id); if(!p || !p.id) return;
+  if(!p.arch){
+    var c = projTaskCount(id);
+    if(c.active > 0 && !confirm('「' + p.name + '」には未完了のタスクが ' + c.active + '件あります。\n\n' +
+        'アーカイブすると新規タスクの案件候補から外れますが、\n既存のタスクはボードに残ります。')) return;
+    p.arch = true;
+    if(c.active === 0) S.filter = S.filter.filter(function(x){ return x !== id; });
+  }else{
+    p.arch = false;
+  }
+  setState({});
+}
+function deleteProj(id){
+  var p = proj(id); if(!p || !p.id) return;
+  if(projTaskCount(id).total > 0) return;    // タスクが残っている案件は消させない
+  if(!confirm('案件「' + p.name + '」を削除します。よろしいですか？')) return;
+  S.filter = S.filter.filter(function(x){ return x !== id; });
+  setState({ projects:S.projects.filter(function(x){ return x.id !== id; }) });
 }
 
 /* ---- 編集フロー ---- */
@@ -375,7 +454,7 @@ function closeEdit(){ setState({ edit:null }, { persist:false }); }
 function saveEdit(){
   var e = S.edit; if(!e) return;
   var t = task(e.id);
-  if(t){ t.pj = e.pj; t.t = e.title.trim() || t.t; t.u = e.u; t.i = e.i; t.due = e.due; }
+  if(t){ t.pj = e.pj; t.t = e.title.trim() || t.t; t.u = e.u; t.i = e.i; t.due = e.due; touchProj(e.pj); }
   setState({ edit:null });
 }
 function deleteFromEdit(){
@@ -682,7 +761,8 @@ function matrixView(){
 function listView(){
   var rows = activeTasks().slice();
   if(S.sort === 'due')       rows.sort(function(a,b){ return dueSortKey(a) - dueSortKey(b); });
-  else if(S.sort === 'proj') rows.sort(function(a,b){ return a.pj.localeCompare(b.pj) || dueSortKey(a) - dueSortKey(b); });
+  // 案件順は内部IDではなく案件名で並べる（改名しても表示順が納得できるように）
+  else if(S.sort === 'proj') rows.sort(function(a,b){ return proj(a.pj).name.localeCompare(proj(b.pj).name, 'ja') || dueSortKey(a) - dueSortKey(b); });
   else                       rows.sort(function(a,b){ return priRank(a) - priRank(b) || dueSortKey(a) - dueSortKey(b); });
 
   function sortBtn(key, label){
@@ -691,16 +771,44 @@ function listView(){
       onclick:function(){ setState({ sort:key }, { persist:false }); }
     }, label);
   }
+
+  // タスク名と案件名で絞り込む。入力中に再描画するとフォーカスが飛ぶので、
+  // 該当しない行を隠して件数表示だけを書き換える
+  var rowRefs = [], countEl = null;
+  var noHitEl = h('span', { style:'display:none; font-size:13px; color:oklch(0.72 0.008 260); padding:8px 2px;' }, '一致するタスクがありません。');
+  var rowEls = rows.map(function(t){
+    var el = taskRow(t);
+    rowRefs.push({ key:(t.t + ' ' + proj(t.pj).name).toLowerCase(), el:el });
+    return el;
+  });
+  function applyTaskSearch(q){
+    q = (q || '').trim().toLowerCase();
+    var hit = 0;
+    rowRefs.forEach(function(r){
+      var vis = !q || r.key.indexOf(q) >= 0;
+      r.el.style.display = vis ? 'block' : 'none';
+      if(vis) hit++;
+    });
+    noHitEl.style.display = (hit === 0 && rows.length > 0) ? 'block' : 'none';
+    if(countEl) countEl.textContent = q ? (hit + ' / ' + rows.length + '件') : (rows.length + '件');
+  }
+
   return h('div', { style:'height:100%; display:flex; flex-direction:column; padding:16px 22px 18px;' },
-    h('div', { style:'display:flex; align-items:center; gap:10px; padding-bottom:12px;' },
+    h('div', { style:'display:flex; align-items:center; gap:10px; padding-bottom:12px; flex-wrap:wrap;' },
+      h('input', {
+        placeholder:'🔍 タスク・案件名で検索',
+        style:'flex:1 1 200px; min-width:150px; height:38px; padding:0 14px; border:1px solid oklch(0.88 0.005 95); border-radius:10px; font-size:14px; background:oklch(0.99 0.003 90); color:oklch(0.32 0.012 260); outline:none;',
+        oninput:function(ev){ applyTaskSearch(ev.target.value); }
+      }),
       h('span', { style:'font-size:12px; color:oklch(0.58 0.01 260);' }, '並び替え'),
       h('div', { style:'display:flex; padding:3px; gap:2px; background:oklch(0.93 0.005 95); border-radius:10px;' },
         sortBtn('due','期限日'), sortBtn('proj','案件'), sortBtn('pri','緊急・重要')),
-      spacer(),
-      h('span', { style:'font-size:12px; color:oklch(0.6 0.01 260); font-variant-numeric:tabular-nums;', text:rows.length + '件' })
+      h('span', { style:'font-size:12px; color:oklch(0.6 0.01 260); font-variant-numeric:tabular-nums; white-space:nowrap;',
+        text:rows.length + '件', ref:function(el){ countEl = el; } })
     ),
     h('div', { style:'flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:8px;' },
-      rows.map(taskRow),
+      rowEls,
+      noHitEl,
       rows.length === 0 ? h('span', { style:'font-size:13px; color:oklch(0.72 0.008 260); padding:8px 2px;' }, 'タスクなし') : null
     )
   );
@@ -717,10 +825,15 @@ function filterDrawer(){
         h('button', { style:'border:none; background:transparent; font-size:20px; color:oklch(0.55 0.01 260); cursor:pointer;', onclick:toggleFilter }, '✕')
       ),
       h('span', { style:'font-size:12px; color:oklch(0.6 0.01 260); margin:6px 0 16px;' }, '複数選択できます。未選択の場合は全案件を表示。'),
-      h('div', { style:'flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:8px;' },
-        S.projects.map(function(p){
+      (function(){
+        // アーカイブ済みでも、まだボードにタスクが残っていれば絞り込めるようにする
+        var list = S.projects.filter(function(p){
+          return !p.arch || projTaskCount(p.id).active > 0;
+        });
+        var rowEls = [], noHit = h('span', { style:'display:none; font-size:12px; color:oklch(0.65 0.01 260); padding:4px 2px;' }, '該当する案件がありません。');
+        var rows = list.map(function(p){
           var on = S.filter.indexOf(p.id) >= 0, pc = projColor(p.hue);
-          return h('button', {
+          var el = h('button', {
             style:'display:flex; align-items:center; gap:12px; padding:12px 14px; border:1px solid ' +
               (on ? pc : 'oklch(0.9 0.005 95)') + '; background:' + (on ? 'oklch(0.98 0.01 260)' : 'transparent') +
               '; border-radius:11px; cursor:pointer; flex:0 0 auto;',
@@ -731,8 +844,26 @@ function filterDrawer(){
             h('span', { style:'width:22px; height:22px; border-radius:6px; display:flex; align-items:center; justify-content:center; font-size:13px; ' +
               (on ? 'background:' + pc + '; color:#fff;' : 'border:1.5px solid oklch(0.82 0.01 260); color:transparent;') }, on ? '✓' : '')
           );
-        })
-      ),
+          rowEls.push({ name:p.name.toLowerCase(), el:el });
+          return el;
+        });
+        return h('div', { style:'flex:1; min-height:0; display:flex; flex-direction:column; gap:8px;' },
+          list.length >= PROJ_GROUP_MIN ? h('input', {
+            placeholder:'🔍 案件名で絞り込み',
+            style:'flex:0 0 auto; height:40px; padding:0 14px; border:1px solid oklch(0.88 0.005 95); border-radius:10px; font-size:14px; background:oklch(0.99 0.003 90); color:oklch(0.32 0.012 260); outline:none;',
+            oninput:function(ev){
+              var q = (ev.target.value || '').trim().toLowerCase(), hit = 0;
+              rowEls.forEach(function(r){
+                var vis = !q || r.name.indexOf(q) >= 0;
+                r.el.style.display = vis ? 'flex' : 'none';
+                if(vis) hit++;
+              });
+              noHit.style.display = hit ? 'none' : 'block';
+            }
+          }) : null,
+          h('div', { style:'flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:8px;' }, rows, noHit)
+        );
+      })(),
       h('button', { style:'height:44px; margin-top:12px; ' + ghostBtn, onclick:function(){ setState({ filter:[] }, { persist:false }); } }, '絞り込みを解除')
     )
   ];
@@ -841,8 +972,20 @@ function addModal(){
     // 案件が多いときは絞り込み欄を出す。入力中に再描画するとフォーカスが飛ぶので、
     // 該当する行の表示/非表示だけを直接切り替える
     var projRows = [], noHitEl = null;
-    var showSearch = S.projects.length >= 8;
-    var rows = S.projects.map(function(p){
+    var pick = pickerProjects();
+    var useGroups = pick.length >= PROJ_GROUP_MIN;
+    var showSearch = useGroups;
+    var headerEls = [];
+
+    // 使うのは常に一部の案件なので、多いときは「最近使った案件」を先頭に出す
+    var recent = [], rest = pick;
+    if(useGroups){
+      recent = pick.filter(function(p){ return p.usedAt; })
+                   .sort(function(x, y){ return y.usedAt - x.usedAt; })
+                   .slice(0, RECENT_PROJ_MAX);
+      rest = pick.filter(function(p){ return recent.indexOf(p) < 0; });
+    }
+    function projBtn(p){
       var sel = a.pj === p.id, pc = projColor(p.hue);
       var el = h('button', {
         style:'display:flex; align-items:center; gap:12px; padding:13px 15px; border:1.5px solid ' +
@@ -856,7 +999,20 @@ function addModal(){
       );
       projRows.push({ name:p.name.toLowerCase(), el:el });
       return el;
-    });
+    }
+    function groupLabel(text){
+      var el = h('span', { style:'display:block; font-size:11px; font-weight:700; color:oklch(0.62 0.01 260); letter-spacing:.06em; padding:2px 2px 0;', text:text });
+      headerEls.push(el);
+      return el;
+    }
+    var listChildren = [];
+    if(recent.length){
+      listChildren.push(groupLabel('最近使った案件'));
+      listChildren = listChildren.concat(recent.map(projBtn));
+      if(rest.length) listChildren.push(groupLabel('すべての案件'));
+    }
+    listChildren = listChildren.concat(rest.map(projBtn));
+
     noHitEl = h('span', { style:'display:none; font-size:12px; color:oklch(0.65 0.01 260); padding:4px 2px;' },
       '該当する案件がありません。下の欄から新規追加できます。');
     function applyProjFilter(q){
@@ -867,7 +1023,9 @@ function addModal(){
         r.el.style.display = on ? 'flex' : 'none';
         if(on) hit++;
       });
-      noHitEl.style.display = hit ? 'none' : '';
+      // 検索中はグループ見出しを畳んで、該当分だけの一覧にする
+      headerEls.forEach(function(el){ el.style.display = q ? 'none' : 'block'; });
+      noHitEl.style.display = hit ? 'none' : 'block';
     }
     body = h('div', {},
       h('span', { style:'font-size:13px; font-weight:700; color:oklch(0.5 0.01 260);' }, '① 案件を選ぶ'),
@@ -876,7 +1034,7 @@ function addModal(){
         style:'width:100%; height:40px; margin-top:10px; padding:0 14px; border:1px solid oklch(0.88 0.005 95); border-radius:10px; font-size:14px; background:oklch(0.985 0.004 90); color:oklch(0.32 0.012 260); outline:none;',
         oninput:function(ev){ applyProjFilter(ev.target.value); }
       }) : null,
-      h('div', { style:'display:flex; flex-direction:column; gap:8px; margin-top:12px;' }, rows, noHitEl),
+      h('div', { style:'display:flex; flex-direction:column; gap:8px; margin-top:12px;' }, listChildren, noHitEl),
       h('div', { style:'display:flex; gap:8px; margin-top:12px;' },
         h('input', {
           value:S.newProjName, placeholder:'＋ 新規案件を追加',
@@ -990,7 +1148,8 @@ function editModal(){
         h('div', {},
           h('span', { style:'font-size:12px; font-weight:700; color:oklch(0.5 0.01 260);' }, '案件'),
           h('div', { style:'display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;' },
-            S.projects.map(function(p){
+            // アーカイブ済みは候補から外すが、そのタスクが今使っている案件は必ず残す
+            S.projects.filter(function(p){ return !p.arch || p.id === e.pj; }).map(function(p){
               var sel = e.pj === p.id, pc = projColor(p.hue);
               return h('button', {
                 style:'display:flex; align-items:center; gap:7px; padding:9px 14px; border:1.5px solid ' +
@@ -1077,6 +1236,21 @@ function settingsModal(){
             oninput:function(e){ S.owner = e.target.value; save(); }
           }),
           h('div', { style:'margin-top:6px;' }, note('画面左上に表示されます。このボードはこの端末専用で、他のメンバーからは見えません。'))
+        ),
+
+        h('div', {},
+          label('案件の整理'),
+          h('div', { style:'margin:8px 0 10px;' },
+            note('案件名の修正、色の変更、終わった案件のアーカイブができます。'
+               + 'アーカイブすると新規タスクの案件候補から外れ、選びやすくなります。')),
+          h('div', { style:'display:flex; align-items:center; gap:10px;' },
+            h('button', {
+              style:'height:44px; padding:0 20px; border:1px solid oklch(0.88 0.005 95); background:transparent; border-radius:12px; font-size:14px; font-weight:700; color:oklch(0.4 0.01 260); cursor:pointer;',
+              onclick:openProjects
+            }, '案件を整理する'),
+            h('span', { style:'font-size:11px; color:oklch(0.6 0.01 260); font-variant-numeric:tabular-nums;',
+              text:'利用中 ' + pickerProjects().length + '件 ／ アーカイブ ' + (S.projects.length - pickerProjects().length) + '件' })
+          )
         ),
 
         h('div', {},
@@ -1181,6 +1355,76 @@ function updateBar(){
   );
 }
 
+/* 案件の整理画面。改名・色変更・アーカイブ・削除。
+   案件は作るだけで直せない／消せない状態だと、増える一方で選びにくくなるため。 */
+function projectsScreen(){
+  var live = S.projects.filter(function(p){ return !p.arch; });
+  var archived = S.projects.filter(function(p){ return !!p.arch; });
+
+  function row(p){
+    var pc = projColor(p.hue), c = projTaskCount(p.id), canDelete = c.total === 0;
+    var paletteOpen = S.paletteFor === p.id;
+    return h('div', { style:'flex:0 0 auto; border:1px solid oklch(0.91 0.005 95); border-radius:12px; background:oklch(0.99 0.003 90); padding:10px 12px; display:flex; flex-direction:column; gap:8px;' + (p.arch ? ' opacity:.75;' : '') },
+      h('div', { style:'display:flex; align-items:center; gap:10px; flex-wrap:wrap;' },
+        h('button', {
+          title:'色を変える',
+          style:'width:34px; height:34px; flex:0 0 auto; border:1px solid oklch(0.88 0.005 95); border-radius:9px; background:' + pc + '; cursor:pointer;',
+          onclick:function(){ setState({ paletteFor: paletteOpen ? null : p.id }, { persist:false }); }
+        }),
+        h('input', {
+          value:p.name,
+          style:'flex:1 1 180px; min-width:140px; height:40px; padding:0 12px; border:1px solid oklch(0.88 0.005 95); border-radius:10px; font-size:15px; color:oklch(0.3 0.012 260); background:oklch(0.995 0.003 90); outline:none;',
+          oninput:function(ev){ renameProj(p.id, ev.target.value); }
+        }),
+        h('span', { style:'font-size:11px; color:oklch(0.6 0.01 260); font-variant-numeric:tabular-nums; white-space:nowrap;',
+          text:'未完了 ' + c.active + ' / 完了 ' + c.done }),
+        h('button', {
+          style:'height:36px; padding:0 14px; border:1px solid oklch(0.88 0.005 95); background:transparent; border-radius:9px; font-size:12px; color:oklch(0.45 0.01 260); cursor:pointer; white-space:nowrap;',
+          onclick:function(){ toggleProjArchive(p.id); }
+        }, p.arch ? '利用に戻す' : 'アーカイブ'),
+        h('button', {
+          title: canDelete ? '' : 'タスクが残っている案件は削除できません',
+          style:'height:36px; padding:0 12px; border:1px solid ' + (canDelete ? 'oklch(0.78 0.09 30)' : 'oklch(0.92 0.005 95)') +
+            '; background:transparent; border-radius:9px; font-size:12px; color:' + (canDelete ? 'oklch(0.55 0.14 30)' : 'oklch(0.78 0.008 260)') +
+            '; cursor:' + (canDelete ? 'pointer' : 'not-allowed') + '; white-space:nowrap;',
+          onclick:function(){ if(canDelete) deleteProj(p.id); }
+        }, '削除')
+      ),
+      paletteOpen ? h('div', { style:'display:flex; flex-wrap:wrap; gap:8px; padding:4px 2px 2px;' },
+        PALETTE_HUES.map(function(hu){
+          var on = Math.abs(hu - p.hue) < 8;
+          return h('button', {
+            style:'width:30px; height:30px; border-radius:50%; cursor:pointer; background:' + projColor(hu) +
+              '; border:2.5px solid ' + (on ? 'oklch(0.35 0.012 260)' : 'transparent') + ';',
+            onclick:function(){ setProjHue(p.id, hu); }
+          });
+        })
+      ) : null
+    );
+  }
+
+  return h('div', { style:'position:absolute; inset:0; background:oklch(0.97 0.005 90); z-index:72; display:flex; flex-direction:column;' },
+    h('div', { style:'height:66px; flex:0 0 66px; display:flex; align-items:center; gap:12px; padding:0 22px; border-bottom:1px solid oklch(0.9 0.005 95);' },
+      h('button', { style:'border:none; background:transparent; font-size:15px; color:oklch(0.45 0.01 260); cursor:pointer; display:flex; align-items:center; gap:6px;', onclick:closeProjects },
+        h('span', { style:'font-size:18px;' }, '‹'), '設定に戻る'),
+      spacer(),
+      h('span', { style:'font-size:16px; font-weight:700; color:oklch(0.34 0.012 260);' }, '案件の整理'),
+      spacer(),
+      h('span', { style:'font-size:12px; color:oklch(0.6 0.01 260); font-variant-numeric:tabular-nums; width:120px; text-align:right;', text:'利用中 ' + live.length + '件' })
+    ),
+    h('div', { style:'flex:1; min-height:0; overflow-y:auto; padding:18px 22px; display:flex; flex-direction:column; gap:10px;' },
+      h('span', { style:'font-size:11px; color:oklch(0.6 0.01 260); line-height:1.7;' },
+        '名前はその場で直せます。色は左のボタンから変更できます。' +
+        'アーカイブしても既存のタスクはボードに残り、案件名と色もそのまま保たれます。'),
+      live.length ? h('span', { style:'font-size:12px; font-weight:700; color:oklch(0.5 0.01 260); margin-top:4px;' }, '利用中の案件') : null,
+      live.map(row),
+      live.length === 0 ? h('span', { style:'font-size:13px; color:oklch(0.7 0.008 260); padding:8px 2px;' }, '利用中の案件はありません。') : null,
+      archived.length ? h('span', { style:'font-size:12px; font-weight:700; color:oklch(0.5 0.01 260); margin-top:10px;', text:'アーカイブ済み（' + archived.length + '件）' }) : null,
+      archived.map(row)
+    )
+  );
+}
+
 function archiveScreen(){
   var rows = S.tasks.filter(function(t){ return t.arch; });
   return h('div', { style:'position:absolute; inset:0; background:oklch(0.97 0.005 90); z-index:70; display:flex; flex-direction:column;' },
@@ -1242,6 +1486,7 @@ function render(){
   if(S.add)         root.appendChild(addModal());
   if(S.edit)        root.appendChild(editModal());
   if(S.settingsOpen)root.appendChild(settingsModal());
+  if(S.projectsOpen)root.appendChild(projectsScreen());
   if(S.archiveOpen) root.appendChild(archiveScreen());
   if(S.toast)       root.appendChild(toastEl());
   if(S.updateReady) root.appendChild(updateBar());
