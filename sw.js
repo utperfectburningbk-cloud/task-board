@@ -6,7 +6,7 @@
  *
  * 更新手順: index.html の APP_VERSION と、下の CACHE を同じ値に上げる。
  */
-var CACHE = 'task-board-v1.6.0';
+var CACHE = 'task-board-v1.7.0';
 
 var PRECACHE = [
   './',

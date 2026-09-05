@@ -41,7 +41,7 @@
 /* ============================================================
    定数
    ============================================================ */
-var APP_VERSION = '1.6.0';    // 更新時は sw.js の CACHE も同じ値に上げること
+var APP_VERSION = '1.7.0';    // 更新時は sw.js の CACHE も同じ値に上げること
 var STORE_KEY = 'lrt-task-board-v1';
 var CARD_CAP  = 4;            // 各象限の既定表示件数（超過分は折りたたむ）
 var ARCHIVE_DELAY = 4200;     // 完了 → 自動アーカイブまで(ms)
@@ -95,6 +95,42 @@ function badgeText(ds){
   if(ds.k === 'today') return '本日';
   if(ds.k === 'soon')  return 'あと' + ds.n + '日';
   return '';
+}
+
+/* ---- 案件の着工日 ----
+   着工前 / 当日 / 着工済み / 未設定 の4状態。
+   着工前は「あと何日」、着工済みは「経過何日」を見せる。 */
+function startState(s){
+  if(!s) return { k:'none', n:null };
+  var n = daysTo(s);
+  if(n > 0)  return { k:'before', n:n };
+  if(n === 0)return { k:'today',  n:0 };
+  return { k:'after', n:n };
+}
+function startText(st){
+  if(st.k === 'none')   return '着工日 未設定';
+  if(st.k === 'today')  return '本日着工';
+  if(st.k === 'before') return '着工まで' + st.n + '日';
+  return '着工済み ' + (-st.n) + '日';
+}
+function startChip(s){
+  var st = startState(s), bg, col;
+  if(st.k === 'today'){                       bg = 'oklch(0.72 0.15 58)';  col = 'oklch(0.99 0.01 60)'; }
+  else if(st.k === 'before' && st.n <= 30){   bg = 'oklch(0.94 0.06 80)';  col = 'oklch(0.42 0.09 70)'; }
+  else if(st.k === 'before'){                 bg = 'oklch(0.95 0.015 250)';col = 'oklch(0.45 0.04 250)'; }
+  else if(st.k === 'after'){                  bg = 'oklch(0.94 0.005 95)'; col = 'oklch(0.5 0.01 260)'; }
+  else {                                      bg = 'transparent';          col = 'oklch(0.68 0.008 260)'; }
+  return { text:startText(st), style:'font-size:11px; font-weight:700; padding:3px 9px; border-radius:7px; white-space:nowrap; background:' + bg + '; color:' + col + ';' };
+}
+/* 着工日の並び順: ①これから着工（近い順） ②着工済み（新しい順） ③未設定 */
+function projStartRank(p){
+  if(!p || !p.start) return [2, 0];
+  var n = daysTo(p.start);
+  return n >= 0 ? [0, n] : [1, -n];
+}
+function cmpProjStart(a, b){
+  var ra = projStartRank(a), rb = projStartRank(b);
+  return (ra[0] - rb[0]) || (ra[1] - rb[1]) || String(a && a.name).localeCompare(String(b && b.name), 'ja');
 }
 
 /* ============================================================
@@ -422,6 +458,11 @@ function setProjHue(id, hue){
   var p = proj(id);
   if(p && p.id) p.hue = hue;
   setState({ paletteFor:null });
+}
+function setProjStart(id, v){
+  var p = proj(id);
+  if(p && p.id) p.start = v || '';
+  setState({});
 }
 function toggleProjArchive(id){
   var p = proj(id); if(!p || !p.id) return;
@@ -761,8 +802,8 @@ function matrixView(){
 function listView(){
   var rows = activeTasks().slice();
   if(S.sort === 'due')       rows.sort(function(a,b){ return dueSortKey(a) - dueSortKey(b); });
-  // 案件順は内部IDではなく案件名で並べる（改名しても表示順が納得できるように）
-  else if(S.sort === 'proj') rows.sort(function(a,b){ return proj(a.pj).name.localeCompare(proj(b.pj).name, 'ja') || dueSortKey(a) - dueSortKey(b); });
+  // 案件順は着工日の近い案件を先頭にまとめる（着工前が近い順 → 着工済み → 未設定）
+  else if(S.sort === 'proj') rows.sort(function(a,b){ return cmpProjStart(proj(a.pj), proj(b.pj)) || dueSortKey(a) - dueSortKey(b); });
   else                       rows.sort(function(a,b){ return priRank(a) - priRank(b) || dueSortKey(a) - dueSortKey(b); });
 
   function sortBtn(key, label){
@@ -774,13 +815,34 @@ function listView(){
 
   // タスク名と案件名で絞り込む。入力中に再描画するとフォーカスが飛ぶので、
   // 該当しない行を隠して件数表示だけを書き換える
-  var rowRefs = [], countEl = null;
+  var rowRefs = [], groupRefs = [], countEl = null;
   var noHitEl = h('span', { style:'display:none; font-size:13px; color:oklch(0.72 0.008 260); padding:8px 2px;' }, '一致するタスクがありません。');
-  var rowEls = rows.map(function(t){
+
+  // 案件順のときは案件ごとの見出しを挟む。着工日の状態を出して並び順の理由を見せる
+  function projGroupHeader(p){
+    var pc = projColor(p.hue), st = startChip(p.start);
+    return h('div', { style:'flex:0 0 auto; display:flex; align-items:center; gap:8px; padding:10px 2px 2px;' },
+      h('span', { style:'width:10px; height:10px; border-radius:3px; background:' + pc + '; flex:0 0 auto;' }),
+      h('span', { style:'font-size:13px; font-weight:700; color:' + pc + ';', text:p.name }),
+      h('span', { style:st.style, text:st.text })
+    );
+  }
+
+  var rowEls = [], curPj = null, curGroup = null;
+  rows.forEach(function(t){
+    if(S.sort === 'proj' && t.pj !== curPj){
+      curPj = t.pj;
+      curGroup = { el:projGroupHeader(proj(t.pj)), rows:[] };
+      groupRefs.push(curGroup);
+      rowEls.push(curGroup.el);
+    }
     var el = taskRow(t);
-    rowRefs.push({ key:(t.t + ' ' + proj(t.pj).name).toLowerCase(), el:el });
-    return el;
+    var ref = { key:(t.t + ' ' + proj(t.pj).name).toLowerCase(), el:el };
+    if(S.sort === 'proj' && curGroup) curGroup.rows.push(ref);
+    rowRefs.push(ref);
+    rowEls.push(el);
   });
+
   function applyTaskSearch(q){
     q = (q || '').trim().toLowerCase();
     var hit = 0;
@@ -788,6 +850,11 @@ function listView(){
       var vis = !q || r.key.indexOf(q) >= 0;
       r.el.style.display = vis ? 'block' : 'none';
       if(vis) hit++;
+    });
+    // 中身が全部隠れた案件見出しも一緒に畳む
+    groupRefs.forEach(function(g){
+      var any = g.rows.some(function(r){ return r.el.style.display !== 'none'; });
+      g.el.style.display = any ? 'flex' : 'none';
     });
     noHitEl.style.display = (hit === 0 && rows.length > 0) ? 'block' : 'none';
     if(countEl) countEl.textContent = q ? (hit + ' / ' + rows.length + '件') : (rows.length + '件');
@@ -802,7 +869,7 @@ function listView(){
       }),
       h('span', { style:'font-size:12px; color:oklch(0.58 0.01 260);' }, '並び替え'),
       h('div', { style:'display:flex; padding:3px; gap:2px; background:oklch(0.93 0.005 95); border-radius:10px;' },
-        sortBtn('due','期限日'), sortBtn('proj','案件'), sortBtn('pri','緊急・重要')),
+        sortBtn('due','期限日'), sortBtn('proj','案件・着工順'), sortBtn('pri','緊急・重要')),
       h('span', { style:'font-size:12px; color:oklch(0.6 0.01 260); font-variant-numeric:tabular-nums; white-space:nowrap;',
         text:rows.length + '件', ref:function(el){ countEl = el; } })
     ),
@@ -1389,6 +1456,15 @@ function projectsScreen(){
             '; cursor:' + (canDelete ? 'pointer' : 'not-allowed') + '; white-space:nowrap;',
           onclick:function(){ if(canDelete) deleteProj(p.id); }
         }, '削除')
+      ),
+      h('div', { style:'display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding-left:44px;' },
+        h('span', { style:'font-size:12px; color:oklch(0.5 0.01 260); white-space:nowrap;' }, '着工日'),
+        h('input', {
+          type:'date', value:p.start || '',
+          style:'height:38px; padding:0 12px; border:1px solid oklch(0.88 0.005 95); border-radius:10px; font-size:14px; color:oklch(0.3 0.012 260); background:oklch(0.995 0.003 90); outline:none;',
+          oninput:function(ev){ setProjStart(p.id, ev.target.value); }
+        }),
+        (function(){ var st = startChip(p.start); return h('span', { style:st.style, text:st.text }); })()
       ),
       paletteOpen ? h('div', { style:'display:flex; flex-wrap:wrap; gap:8px; padding:4px 2px 2px;' },
         PALETTE_HUES.map(function(hu){
