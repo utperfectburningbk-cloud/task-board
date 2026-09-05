@@ -41,7 +41,7 @@
 /* ============================================================
    定数
    ============================================================ */
-var APP_VERSION = '1.7.0';    // 更新時は sw.js の CACHE も同じ値に上げること
+var APP_VERSION = '1.7.1';    // 更新時は sw.js の CACHE も同じ値に上げること
 var STORE_KEY = 'lrt-task-board-v1';
 var CARD_CAP  = 4;            // 各象限の既定表示件数（超過分は折りたたむ）
 var ARCHIVE_DELAY = 4200;     // 完了 → 自動アーカイブまで(ms)
@@ -236,7 +236,7 @@ var S = {
   filter:[], sort:'due', expanded:{},
   filterOpen:false, archiveOpen:false, settingsOpen:false, triageOpen:false,
   projectsOpen:false, paletteFor:null,
-  add:null, edit:null, newProjName:'',
+  add:null, edit:null, newProjName:'', newProjStart:'',
   updateReady:false,
   loadError:boot.loadError || null,   // 保存データを読めなかった
   saveError:null,                     // 保存できていない
@@ -406,7 +406,7 @@ function swUp(){
    緊急度・重要度と期日は省略できる。省略したタスクは「未分類」に入り、
    あとで振り分けドロワーやリスト画面から設定する。 */
 function openAdd(){
-  setState({ add:{ step:1, pj:null, title:'', u:null, i:null, due:'' }, newProjName:'' }, { persist:false });
+  setState({ add:{ step:1, pj:null, title:'', u:null, i:null, due:'' }, newProjName:'', newProjStart:'' }, { persist:false });
 }
 function closeAdd(){ setState({ add:null }, { persist:false }); }
 function addBack(){
@@ -442,9 +442,9 @@ function addQuick(){
 function addNewProj(){
   var n = S.newProjName.trim(); if(!n) return;
   var id = uid('p');
-  S.projects = S.projects.concat([{ id:id, name:n, hue:nextHue(), usedAt:Date.now() }]);
+  S.projects = S.projects.concat([{ id:id, name:n, hue:nextHue(), start:S.newProjStart || '', usedAt:Date.now() }]);
   if(S.add) S.add.pj = id;
-  setState({ newProjName:'' });
+  setState({ newProjName:'', newProjStart:'' });
 }
 
 /* ---- 案件の整理 ---- */
@@ -1039,6 +1039,10 @@ function addModal(){
     // 案件が多いときは絞り込み欄を出す。入力中に再描画するとフォーカスが飛ぶので、
     // 該当する行の表示/非表示だけを直接切り替える
     var projRows = [], noHitEl = null;
+    var newProjStartRow = null;
+    function refreshNewProjStart(){
+      if(newProjStartRow) newProjStartRow.style.display = S.newProjName.trim() ? 'flex' : 'none';
+    }
     var pick = pickerProjects();
     var useGroups = pick.length >= PROJ_GROUP_MIN;
     var showSearch = useGroups;
@@ -1106,14 +1110,32 @@ function addModal(){
         h('input', {
           value:S.newProjName, placeholder:'＋ 新規案件を追加',
           style:'flex:1; height:44px; padding:0 14px; border:1px dashed oklch(0.8 0.01 260); border-radius:11px; font-size:14px; background:transparent; color:oklch(0.32 0.012 260); outline:none;',
-          oninput:function(e){ S.newProjName = e.target.value; },
+          oninput:function(e){ S.newProjName = e.target.value; refreshNewProjStart(); },
           onkeydown:function(e){ if(e.key === 'Enter'){ e.preventDefault(); addNewProj(); } }
         }),
         h('button', {
           style:'height:44px; padding:0 18px; border:none; border-radius:11px; font-size:14px; font-weight:700; cursor:pointer; background:oklch(0.4 0.012 260); color:#fff;',
           onclick:addNewProj
         }, '追加')
-      )
+      ),
+      // 着工日は案件名を入れたときだけ出す（普段の①画面を重くしないため）
+      (function(){
+        var chip = startChip(S.newProjStart);
+        newProjStartRow = h('div', {
+          style:'display:' + (S.newProjName.trim() ? 'flex' : 'none') +
+            '; align-items:center; gap:8px; margin-top:8px; padding-left:2px; flex-wrap:wrap;'
+        },
+          h('span', { style:'font-size:12px; color:oklch(0.5 0.01 260); white-space:nowrap;' }, '着工日（任意）'),
+          h('input', {
+            type:'date', value:S.newProjStart,
+            style:'height:38px; padding:0 12px; border:1px solid oklch(0.86 0.006 95); border-radius:10px; font-size:14px; color:oklch(0.3 0.012 260); background:transparent; outline:none;',
+            oninput:function(ev){ S.newProjStart = ev.target.value; setState({}, { persist:false }); }
+          }),
+          S.newProjStart ? h('span', { style:chip.style, text:chip.text }) : null,
+          h('span', { style:'font-size:11px; color:oklch(0.65 0.01 260);' }, 'あとから「⚙ → 案件を整理する」でも設定できます')
+        );
+        return newProjStartRow;
+      })()
     );
   }else if(a.step === 2){
     body = h('div', {},
