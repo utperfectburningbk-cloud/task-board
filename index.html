@@ -48,9 +48,9 @@
 /* ============================================================
    定数
    ============================================================ */
-var APP_VERSION = '1.8.0';    // 更新時は sw.js の CACHE も同じ値に上げること
+var APP_VERSION = '1.8.1';    // 更新時は sw.js の CACHE も同じ値に上げること
 var STORE_KEY = 'lrt-task-board-v1';
-var CARD_CAP  = 4;            // 各象限の既定表示件数（超過分は折りたたむ）
+var CARD_CAP_MIN = 3;         // 各象限に必ず出す件数の下限。実際の上限は画面の高さから決める（cardCap）
 var ARCHIVE_DELAY = 4200;     // 完了 → 自動アーカイブまで(ms)
 var TOAST_DELAY   = 4600;
 
@@ -670,18 +670,21 @@ function checkButton(t, v){
   }, v.done ? '✓' : '');
 }
 function swipeWrap(t, inner){
-  return h('div', { style:'position:relative; border-radius:11px; overflow:hidden; flex:0 0 auto;' },
+  return h('div', { style:'position:relative; border-radius:10px; overflow:hidden; flex:0 0 auto;' },
     h('div', { 'data-del':true, style:'position:absolute; inset:0; background:oklch(0.6 0.17 28); display:flex; align-items:center; justify-content:flex-end; padding-right:18px; color:oklch(0.99 0.01 30); font-size:13px; font-weight:700; opacity:0;' }, '削除'),
     inner
   );
 }
 
-/* マトリクス用カード */
-function taskCard(t){
+/* マトリクス用カード。
+   1段目に「案件名 … 期日・残り日数」、2段目にタスク名、完了ボタンは右端に縦中央で置く。
+   以前の3段構成（案件／タスク名／期日＋完了）は1枚90px前後あり、象限に4枚も収まらなかった。
+   hideProj: 案件ごとの見出しが上にあるときは、カード側の案件名を省いてさらに詰める */
+function taskCard(t, hideProj){
   var v = cardVisuals(t);
   var card = h('div', {
     style:'position:relative; display:flex; align-items:stretch; background:' + v.boxBg +
-      '; border:1px solid ' + v.boxBd + '; border-radius:11px; overflow:hidden; touch-action:pan-y; cursor:pointer;' +
+      '; border:1px solid ' + v.boxBd + '; border-radius:10px; overflow:hidden; touch-action:pan-y; cursor:pointer;' +
       (v.done ? ' opacity:.7;' : ''),
     onpointerdown:function(e){ swDown(e, t.id); },
     onpointermove:swMove,
@@ -689,19 +692,18 @@ function taskCard(t){
     onclick:function(){ openEdit(t.id); }
   },
     h('div', { style:v.bar }),
-    h('div', { style:'flex:1; min-width:0; padding:9px 11px 9px 12px; display:flex; flex-direction:column; gap:5px;' },
-      h('div', { style:'display:flex; align-items:center; gap:6px;' },
-        h('span', { style:v.projDot }),
-        h('span', { style:v.projText, text:v.p.name })
-      ),
-      h('span', { style:v.title, text:t.t }),
-      h('div', { style:'display:flex; align-items:center; gap:8px; margin-top:1px;' },
-        h('span', { style:v.due, text:fmtDue(t.due) }),
-        v.badgeShow ? h('span', { style:v.badgeStyle, text:v.badge }) : null,
+    h('div', { style:'flex:1; min-width:0; padding:6px 4px 7px 10px; display:flex; flex-direction:column; gap:2px;' },
+      h('div', { style:'display:flex; align-items:center; gap:6px; min-width:0; line-height:1.3;' },
+        hideProj ? null : h('span', { style:v.projDot }),
+        hideProj ? null : h('span', { style:v.projText + ' min-width:0;', text:v.p.name }),
         spacer(),
-        checkButton(t, v)
-      )
-    )
+        h('span', { style:v.due + ' white-space:nowrap; flex:0 0 auto;', text:fmtDue(t.due) }),
+        v.badgeShow ? h('span', { style:v.badgeStyle + ' white-space:nowrap; flex:0 0 auto;', text:v.badge }) : null
+      ),
+      // 長いタスク名は2行で打ち切り、カードの高さを揃える（全文は編集画面で見られる）
+      h('span', { style:v.title + ' display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; word-break:break-all;', text:t.t })
+    ),
+    h('div', { style:'flex:0 0 auto; display:flex; align-items:center; padding:0 9px 0 6px;' }, checkButton(t, v))
   );
   return swipeWrap(t, card);
 }
@@ -714,7 +716,7 @@ function taskRow(t){
   var tagBg = unc ? 'oklch(0.96 0.03 80)' : (on ? 'oklch(0.94 0.008 260)' : 'transparent');
   var tagCol = unc ? 'oklch(0.5 0.09 70)' : 'oklch(0.5 0.01 260)';
   var row = h('div', {
-    style:'position:relative; display:flex; align-items:center; height:56px; background:' + v.boxBg +
+    style:'position:relative; display:flex; align-items:center; height:46px; background:' + v.boxBg +
       '; border:1px solid ' + v.boxBd + '; border-radius:11px; overflow:hidden; touch-action:pan-y; cursor:pointer;' +
       (v.done ? ' opacity:.7;' : ''),
     onpointerdown:function(e){ swDown(e, t.id); },
@@ -723,7 +725,7 @@ function taskRow(t){
     onclick:function(){ openEdit(t.id); }
   },
     h('div', { style:v.bar }),
-    h('div', { style:'width:150px; flex:0 0 150px; display:flex; align-items:center; gap:7px; padding-left:14px;' },
+    h('div', { style:'width:140px; flex:0 0 140px; display:flex; align-items:center; gap:7px; padding-left:12px;' },
       h('span', { style:v.projDot }),
       h('span', { style:v.projText, text:v.p.name })
     ),
@@ -736,11 +738,11 @@ function taskRow(t){
         text:priTag(t)
       })
     ),
-    h('div', { style:'width:130px; flex:0 0 130px; display:flex; align-items:center; justify-content:flex-end; gap:8px; padding-right:14px;' },
+    h('div', { style:'width:130px; flex:0 0 130px; display:flex; align-items:center; justify-content:flex-end; gap:8px; padding-right:12px;' },
       h('span', { style:v.due, text:fmtDue(t.due) }),
       v.badgeShow ? h('span', { style:v.badgeStyle, text:v.badge }) : null
     ),
-    checkButton(t, v)
+    h('div', { style:'flex:0 0 auto; padding-right:11px; display:flex; align-items:center;' }, checkButton(t, v))
   );
   return swipeWrap(t, row);
 }
@@ -783,8 +785,26 @@ function filterButton(){
   );
 }
 
+/* 象限に並べる件数の上限を、画面の高さから決める。
+   固定値だと、横向き（高さ834px）では「＋n件を表示」が枠からはみ出し、
+   縦向きでは逆に枠が余る。カード1枚＋間隔 ≒ 58px、「＋n件」ボタン ≒ 36px で見積もる。
+   170 はトップバー・並び替え行・軸ラベル・余白の合計、40 は象限の見出し */
+function cardCap(){
+  var listH = (window.innerHeight - 170) / 2 - 40;
+  return Math.max(CARD_CAP_MIN, Math.floor((listH - 36) / 58));
+}
+var lastCap = null, resizeT = null;
+window.addEventListener('resize', function(){
+  // 回転などで上限が変わるときだけ描き直す（入力中の再描画を避ける）
+  clearTimeout(resizeT);
+  resizeT = setTimeout(function(){
+    if(S.view === 'matrix' && !S.add && !S.edit && !S.projStartEdit && cardCap() !== lastCap) render();
+  }, 200);
+});
+
 function matrixView(){
   var active = activeTasks();
+  var cap = lastCap = cardCap();
   var quads = QUAD_DEFS.map(function(d){
     var list = active.filter(function(t){ return t.u === d.u && t.i === d.i; })
                      .sort(S.msort === 'proj'
@@ -792,19 +812,19 @@ function matrixView(){
                        ? function(a,b){ return cmpProjStart(proj(a.pj), proj(b.pj)) || dueSortKey(a) - dueSortKey(b); }
                        : function(a,b){ return dueSortKey(a) - dueSortKey(b); });
     var exp = !!S.expanded[d.k];
-    var vis = exp ? list : list.slice(0, CARD_CAP);
+    var vis = exp ? list : list.slice(0, cap);
     var hidden = list.length - vis.length;
     var accent = 'oklch(0.56 0.09 ' + d.hue + ')';
     return h('div', { style:'display:flex; flex-direction:column; min-height:0; background:oklch(0.99 0.003 90); border:1px solid oklch(0.91 0.005 95); border-top:3px solid ' + accent + '; border-radius:13px; overflow:hidden;' },
-      h('div', { style:'display:flex; align-items:baseline; gap:8px; padding:12px 14px 8px; flex:0 0 auto;' },
+      h('div', { style:'display:flex; align-items:baseline; gap:8px; padding:9px 12px 6px; flex:0 0 auto;' },
         h('span', { style:'width:9px; height:9px; border-radius:3px; background:' + accent + '; flex:0 0 auto;' }),
         h('span', { style:'font-size:14px; font-weight:700; color:oklch(0.34 0.012 260);', text:d.title }),
         d.sub ? h('span', { style:'font-size:11px; color:oklch(0.62 0.01 260);', text:d.sub }) : null,
         spacer(),
         h('span', { style:'font-size:12px; color:oklch(0.6 0.01 260); font-variant-numeric:tabular-nums;', text:list.length + '件' })
       ),
-      h('div', { style:'flex:1; min-height:0; overflow-y:auto; padding:0 12px 12px; display:flex; flex-direction:column; gap:8px;' },
-        S.msort === 'proj' ? withProjLabels(vis) : vis.map(taskCard),
+      h('div', { style:'flex:1; min-height:0; overflow-y:auto; padding:0 9px 9px; display:flex; flex-direction:column; gap:5px;' },
+        S.msort === 'proj' ? withProjLabels(vis) : vis.map(function(t){ return taskCard(t); }),
         (hidden > 0 || exp) ? h('button', {
           style:'align-self:flex-start; margin-top:2px; padding:6px 12px; border:1px dashed oklch(0.8 0.01 260); background:transparent; border-radius:9px; font-size:12px; color:oklch(0.5 0.01 260); cursor:pointer;',
           onclick:function(){ toggleExpand(d.k); }
@@ -843,7 +863,7 @@ function withProjLabels(cards){
       cur = t.pj;
       out.push(projMiniLabel(proj(t.pj)));
     }
-    out.push(taskCard(t));
+    out.push(taskCard(t, true));        // 見出しに案件名があるのでカード側は省く
   });
   return out;
 }
@@ -957,7 +977,7 @@ function listView(){
       h('span', { style:'font-size:12px; color:oklch(0.6 0.01 260); font-variant-numeric:tabular-nums; white-space:nowrap;',
         text:rows.length + '件', ref:function(el){ countEl = el; } })
     ),
-    h('div', { style:'flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:8px;' },
+    h('div', { style:'flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:6px;' },
       rowEls,
       noHitEl,
       rows.length === 0 ? h('span', { style:'font-size:13px; color:oklch(0.72 0.008 260); padding:8px 2px;' }, 'タスクなし') : null
